@@ -1,0 +1,7 @@
+name = "vertflux-aidraw"
+pages_build_output_dir = "./site"
+compatibility_date = "2026-10-20"
+
+[[services]]
+binding = "DRAW_APP"
+service = "vertflux-draw"

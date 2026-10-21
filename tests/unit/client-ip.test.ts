@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server"
 import { describe, expect, it, vi } from "vitest"
 import { getUserIdFromRequest } from "@/lib/user-id"
-import { proxy } from "@/proxy"
+import { middleware as proxy } from "@/middleware"
 
 const idFor = (ip: string) => `user-${Buffer.from(ip).toString("base64url")}`
 

@@ -40,7 +40,7 @@ function isLanguageTag(language: string): boolean {
     }
 }
 
-export function proxy(request: NextRequest) {
+export function middleware(request: NextRequest) {
     const pathname = request.nextUrl.pathname
 
     if (pathname.startsWith("/api/")) {

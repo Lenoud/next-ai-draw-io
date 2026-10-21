@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server"
 import { describe, expect, it } from "vitest"
-import { proxy } from "@/proxy"
+import { middleware as proxy } from "@/middleware"
 
 // The locale that a page without one redirects to
 const redirectFor = (acceptLanguage?: string, path = "/") => {

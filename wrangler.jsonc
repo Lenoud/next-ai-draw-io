@@ -1,17 +1,19 @@
 {
     "$schema": "node_modules/wrangler/config-schema.json",
     "main": ".open-next/worker.js",
-    "name": "next-ai-draw-io-worker",
+    "name": "vertflux-draw",
     "compatibility_date": "2025-12-08", // must be a today or past compatibility_date
     "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
     "assets": {
         "directory": ".open-next/assets",
-        "binding": "ASSETS"
+        "binding": "ASSETS",
+        // 保留 draw.io 的 index.html 地址，避免嵌入画布被重定向。
+        "html_handling": "none"
     },
     "services": [
         {
             "binding": "WORKER_SELF_REFERENCE",
-            "service": "next-ai-draw-io-worker"
+            "service": "vertflux-draw"
         }
     ]
 }
