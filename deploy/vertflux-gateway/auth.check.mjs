@@ -92,7 +92,7 @@ test('统一认证入口的访问边界', async (t) => {
       return new Response('', { status: 302, headers: { Location: '/dashboard', 'Set-Cookie': '__Host-vertflux_sso=test; Path=/; Secure; HttpOnly; SameSite=Lax' } })
     }
     const app = createAuthGateway(options)
-    const response = await app.fetch(new Request('https://go.vertflux.com/oauth2/callback?code=test&state=test', { headers: { Cookie: '__Host-vertflux_sso_csrf_fixture=test' } }), env)
+    const response = await app.fetch(new Request('https://go.vertflux.com/oauth2/callback?code=test&state=test', { headers: { Cookie: '__Host-vertflux_sso_fixture_csrf=test' } }), env)
     assert.equal(response.status, 302)
     assert.match(response.headers.get('Set-Cookie'), /Secure; HttpOnly/)
     const openRedirect = await app.fetch(new Request('https://go.vertflux.com/oauth2/start?rd=https://other.example'), env)
