@@ -2,6 +2,12 @@
     "$schema": "node_modules/wrangler/config-schema.json",
     "main": ".open-next/worker.js",
     "name": "vertflux-draw",
+    "observability": {
+        "enabled": true,
+        "redact_query_string": true,
+        "logs": { "enabled": true, "invocation_logs": true },
+        "traces": { "enabled": false }
+    },
     "workers_dev": false,
     "preview_urls": false,
     "compatibility_date": "2025-12-08", // must be a today or past compatibility_date

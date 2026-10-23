@@ -92,11 +92,21 @@ test('统一认证入口的访问边界', async (t) => {
       return new Response('', { status: 302, headers: { Location: '/dashboard', 'Set-Cookie': '__Host-vertflux_sso=test; Path=/; Secure; HttpOnly; SameSite=Lax' } })
     }
     const app = createAuthGateway(options)
-    const response = await app.fetch(new Request('https://go.vertflux.com/oauth2/callback?code=test&state=test'), env)
+    const response = await app.fetch(new Request('https://go.vertflux.com/oauth2/callback?code=test&state=test', { headers: { Cookie: '__Host-vertflux_sso_csrf_fixture=test' } }), env)
     assert.equal(response.status, 302)
     assert.match(response.headers.get('Set-Cookie'), /Secure; HttpOnly/)
     const openRedirect = await app.fetch(new Request('https://go.vertflux.com/oauth2/start?rd=https://other.example'), env)
     assert.equal(openRedirect.status, 400)
+  })
+
+  await t.test('缺少 CSRF 的回调不发起换码，异常编码和扫描路径直接拒绝', async () => {
+    globalThis.fetch = async () => { throw new Error('must not request auth') }
+    const app = createAuthGateway(options)
+    const before = calls
+    for (const [path, status] of [['/oauth2/callback', 400], ['/oauth2/callback?code=test&state=test', 403], ['/%5capi/link/list', 400], ['/%255capi/link/list', 400], ['/.env', 404], ['/.git/config', 404]]) {
+      assert.equal((await app.fetch(new Request(`https://go.vertflux.com${path}`), env)).status, status)
+    }
+    assert.equal(calls, before)
   })
 
   await t.test('两个 AI 入口的页面和模型 API 都受保护', async () => {

@@ -1,3 +1,5 @@
+import { auditGateway, callbackError, invalidPath, blockedProbe } from './_audit.mjs'
+
 const AUTH_ORIGIN = 'https://auth.vertflux.com'
 const COOKIE_NAME = '__Host-vertflux_sso'
 
@@ -26,7 +28,7 @@ export function createAuthGateway({ host, binding, managementOnly = false, siteT
   const origin = `https://${host}`
 
   return {
-    async fetch(request, env) {
+    fetch: auditGateway(host, async (request, env, audit) => {
       const url = new URL(request.url)
       let path
       try {
@@ -34,6 +36,8 @@ export function createAuthGateway({ host, binding, managementOnly = false, siteT
       } catch {
         return errorResponse(400, '请求路径无效。')
       }
+      if (invalidPath(path)) return errorResponse(400, '请求路径无效。')
+      if (blockedProbe(path)) return errorResponse(404, '入口不存在。')
       if (url.hostname !== host || url.protocol !== 'https:') {
         if (!['GET', 'HEAD'].includes(request.method))
           return errorResponse(403, '请使用应用的正式域名。')
@@ -52,11 +56,27 @@ export function createAuthGateway({ host, binding, managementOnly = false, siteT
         } catch {
           return errorResponse(400, '登录后的返回地址无效。')
         }
+        const callbackStatus = callbackError(request)
+        if (callbackStatus) {
+          audit.auth_result = 'denied'
+          audit.reason = callbackStatus === 400 ? 'oauth_callback_parameters_missing' : 'oauth_csrf_cookie_missing'
+          return errorResponse(callbackStatus, '登录回调无效，请重新登录。')
+        }
+        audit.auth_result = 'oauth'
         const target = new URL(`/edge/${host.split('.')[0]}${url.pathname}${url.search}`, AUTH_ORIGIN)
-        const headers = new Headers({ Cookie: authCookies(request), Accept: 'text/html' })
+        const headers = new Headers({ Cookie: authCookies(request), Accept: 'text/html', 'X-Request-ID': audit.request_id })
         try {
-          return privateResponse(await fetch(target, { headers, redirect: 'manual', signal: AbortSignal.timeout(15000) }))
+          const started = Date.now()
+          const response = await fetch(target, { headers, redirect: 'manual', signal: AbortSignal.timeout(15000) })
+          audit.upstream_status = response.status
+          audit.upstream_duration_ms = Date.now() - started
+          if (response.status >= 500) {
+            audit.reason = 'oauth_upstream_error'
+            return errorResponse(503, '统一认证暂时不可用，请稍后再试。')
+          }
+          return privateResponse(response)
         } catch {
+          audit.reason = 'oauth_network_error'
           return errorResponse(503, '统一认证暂时不可用，请稍后再试。')
         }
       }
@@ -77,6 +97,7 @@ export function createAuthGateway({ host, binding, managementOnly = false, siteT
       const protectedPath = !managementOnly || /^\/(dashboard|api|_docs)(\/|$)/.test(path)
       let identity
       if (protectedPath) {
+        audit.auth_result = 'required'
         if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && request.headers.get('Origin') !== origin)
           return errorResponse(403, '当前操作必须从应用页面发起。')
         const cookies = authCookies(request)
@@ -88,12 +109,18 @@ export function createAuthGateway({ host, binding, managementOnly = false, siteT
             identity = cached.identity
           } else {
             try {
+              const started = Date.now()
               const response = await fetch(`${AUTH_ORIGIN}/api/session?app=${encodeURIComponent(host)}`, {
-                headers: { Cookie: cookies, Accept: 'application/json' },
+                headers: { Cookie: cookies, Accept: 'application/json', 'X-Request-ID': audit.request_id },
                 redirect: 'manual', signal: AbortSignal.timeout(15000),
               })
-              if (response.status === 403)
+              audit.upstream_status = response.status
+              audit.upstream_duration_ms = Date.now() - started
+              if (response.status === 403) {
+                audit.auth_result = 'denied'
+                audit.reason = 'application_permission_denied'
                 return errorResponse(403, '当前账号没有访问该应用的权限。')
+              }
               if (response.ok) {
                 const session = await response.json()
                 if (typeof session.username !== 'string' || !session.username || typeof session.subject !== 'string' || !session.subject)
@@ -102,14 +129,18 @@ export function createAuthGateway({ host, binding, managementOnly = false, siteT
                 if (sessions.size >= 256) sessions.delete(sessions.keys().next().value)
                 sessions.set(key, { identity, expires: Date.now() + 15000 })
               } else if (response.status !== 401) {
+                audit.reason = 'session_upstream_error'
                 return errorResponse(503, '统一认证暂时不可用，请稍后再试。')
               }
             } catch {
+              audit.reason = 'session_network_error'
               return errorResponse(503, '统一认证暂时不可用，请稍后再试。')
             }
           }
         }
         if (!identity) {
+          audit.auth_result = 'denied'
+          audit.reason = 'login_required'
           const login = `/oauth2/start?rd=${encodeURIComponent(url.href)}`
           if (path.startsWith('/api/') || !['GET', 'HEAD'].includes(request.method) || request.headers.get('Accept')?.includes('application/json'))
             return privateResponse(Response.json({ error: '请先登录。', loginUrl: login }, { status: 401 }))
@@ -117,6 +148,7 @@ export function createAuthGateway({ host, binding, managementOnly = false, siteT
         }
       }
 
+      if (identity) audit.auth_result = 'allowed'
       const headers = new Headers(request.headers)
       for (const name of [...headers.keys()]) {
         if (/^(x-vertflux-|x-auth-request-|x-forwarded-(user|subject|email|groups|preferred-username)|x-user$|x-email$|remote-user$|cf-access-)/i.test(name))
@@ -134,9 +166,10 @@ export function createAuthGateway({ host, binding, managementOnly = false, siteT
         headers.set('X-Vertflux-Username', identity.username)
         headers.set('X-Vertflux-Email', identity.email || '')
       }
+      headers.set('X-Vertflux-Request-ID', audit.request_id)
       const upstream = binding ? env[binding] : env.ASSETS
       const response = await upstream.fetch(new Request(request, { headers }))
       return protectedPath ? privateResponse(response) : response
-    },
+    }),
   }
 }

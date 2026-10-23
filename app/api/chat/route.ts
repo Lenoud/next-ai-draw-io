@@ -38,6 +38,7 @@ import {
     isQuotaEnabled,
     recordTokenUsage,
 } from "@/lib/dynamo-quota-manager"
+import { logChatError } from "@/lib/error-log"
 import {
     endTrace,
     getTelemetryConfig,
@@ -170,9 +171,10 @@ async function handleChatRequest(req: Request): Promise<Response> {
     let serverModel: FlattenedServerModel | null = null
     if (selectedModelId?.startsWith("server:")) {
         serverModel = await findServerModelById(selectedModelId)
-        console.log(
-            `[Server Model Lookup] ID: ${selectedModelId}, Found: ${!!serverModel}, Provider: ${serverModel?.provider}`,
-        )
+        if (DEBUG_LLM_PAYLOAD)
+            console.log(
+                `[Server Model Lookup] ID: ${selectedModelId}, Found: ${!!serverModel}, Provider: ${serverModel?.provider}`,
+            )
         if (serverModel) {
             serverModelConfig = {
                 apiKeyEnv: serverModel.apiKeyEnv,
@@ -244,9 +246,10 @@ async function handleChatRequest(req: Request): Promise<Response> {
     // Read minimal style preference from header
     const minimalStyle = req.headers.get("x-minimal-style") === "true"
 
-    console.log(
-        `[Client Overrides] provider: ${clientOverrides.provider}, modelId: ${clientOverrides.modelId}`,
-    )
+    if (DEBUG_LLM_PAYLOAD)
+        console.log(
+            `[Client Overrides] provider: ${clientOverrides.provider}, modelId: ${clientOverrides.modelId}`,
+        )
 
     // Get AI model with optional client overrides
     const {
@@ -327,7 +330,7 @@ async function handleChatRequest(req: Request): Promise<Response> {
         req.headers.get("x-max-output-tokens"),
         onServerCredentials || onServerEndpoint,
     )
-    console.log(`[maxOutputTokens] ${maxOutputTokens}`)
+    if (DEBUG_LLM_PAYLOAD) console.log(`[maxOutputTokens] ${maxOutputTokens}`)
 
     // The model's thinking switch from the user's settings, on their own key
     // and endpoint only, like the output budget: on the server's, the
@@ -345,9 +348,10 @@ async function handleChatRequest(req: Request): Promise<Response> {
 
     // Check if model supports prompt caching
     const shouldCache = supportsPromptCaching(modelId)
-    console.log(
-        `[Prompt Caching] ${shouldCache ? "ENABLED" : "DISABLED"} for model: ${modelId}`,
-    )
+    if (DEBUG_LLM_PAYLOAD)
+        console.log(
+            `[Prompt Caching] ${shouldCache ? "ENABLED" : "DISABLED"} for model: ${modelId}`,
+        )
 
     // System prompt, with the model name filled in and the style section chosen
     const systemMessage = getSystemPrompt(modelId, minimalStyle)
@@ -480,13 +484,7 @@ async function handleChatRequest(req: Request): Promise<Response> {
         stopWhen: stepCountIs(5),
         // Repair truncated tool calls when maxOutputTokens is reached mid-JSON
         experimental_repairToolCall: async ({ toolCall, error }) => {
-            // DEBUG: Log what we're trying to repair
-            console.log(`[repairToolCall] Tool: ${toolCall.toolName}`)
-            console.log(
-                `[repairToolCall] Error: ${error.name} - ${error.message}`,
-            )
-            console.log(`[repairToolCall] Input type: ${typeof toolCall.input}`)
-            console.log(`[repairToolCall] Input value:`, toolCall.input)
+            // 工具输入包含完整图表；修复失败时仅记录分类。
 
             // Only attempt repair for invalid tool input (broken JSON from truncation)
             if (
@@ -504,9 +502,11 @@ async function handleChatRequest(req: Request): Promise<Response> {
                     )
                     return { ...toolCall, input: repairedInput }
                 } catch (repairError) {
-                    console.warn(
-                        `[repairToolCall] Failed to repair JSON for tool: ${toolCall.toolName}`,
+                    logChatError(
+                        "chat_tool_repair_failed",
                         repairError,
+                        "output_truncated",
+                        req.headers.get("X-Vertflux-Request-ID") || undefined,
                     )
                     // Keep the original error, so the model and the client see why
                     // the input was rejected and the model can retry the call
@@ -543,7 +543,12 @@ async function handleChatRequest(req: Request): Promise<Response> {
         },
         // onFinish is skipped when the stream fails or is aborted, so end the trace here
         onError: ({ error }) => {
-            console.error(error) // what AI SDK does without an onError
+            logChatError(
+                "chat_stream_error",
+                error,
+                classifyLLMError(error).code,
+                req.headers.get("X-Vertflux-Request-ID") || undefined,
+            )
             endTrace()
         },
         onAbort: () => endTrace(),
@@ -580,8 +585,13 @@ async function handleChatRequest(req: Request): Promise<Response> {
 }
 
 // Errors before the stream starts, as JSON the chat panel reads
-function handleError(error: unknown): Response {
-    console.error("Error in chat route:", error)
+function handleError(error: unknown, requestId?: string): Response {
+    logChatError(
+        "chat_request_error",
+        error,
+        classifyLLMError(error).code,
+        requestId,
+    )
 
     const isDev = process.env.NODE_ENV === "development"
     const classified = classifyLLMError(error)
@@ -610,7 +620,10 @@ async function safeHandler(req: Request): Promise<Response> {
     try {
         response = await handleChatRequest(req)
     } catch (error) {
-        response = handleError(error)
+        response = handleError(
+            error,
+            req.headers.get("X-Vertflux-Request-ID") || undefined,
+        )
     }
     // Early returns and errors never reach streamText's callbacks,
     // so their Langfuse trace has to be ended here

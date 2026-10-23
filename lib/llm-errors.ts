@@ -6,6 +6,7 @@ import {
     RetryError,
     ToolCallRepairError,
 } from "ai"
+import { logChatError } from "./error-log"
 
 /**
  * What went wrong with a model call, for a hint the user can act on. The
@@ -131,7 +132,7 @@ export function streamErrorText(error: unknown, hideDetails = false): string {
     if (isToolCallError(error)) return (error as Error).message
     const classified = classifyLLMError(error)
     if (hideDetails) {
-        console.error("[chat] Provider error:", error)
+        logChatError("chat_provider_error", error, classified.code)
         if (classified.code === "forbidden") {
             // The hint says all the user can do; there is no message to add
             classified.code = "server_key_forbidden"
