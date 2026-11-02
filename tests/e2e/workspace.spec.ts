@@ -446,7 +446,7 @@ test.describe("Workspace", () => {
             page.locator('[data-testid="selection-chip"]'),
         ).toContainText("Process")
         await expect(
-            page.locator('[data-testid="selection-ask"]'),
+            page.locator('[data-testid="selection-style"]'),
         ).toBeVisible()
         await sendMessage(page, "Make this red")
         await waitForCompleteCount(page, 2)
@@ -691,7 +691,7 @@ test.describe("Workspace", () => {
         ).toBeLessThan(20)
     })
 
-    test("the ask AI button stays off draw.io's menus and dialogs", async ({
+    test("the buttons next to a selection stay off draw.io's menus and dialogs", async ({
         page,
     }) => {
         await page.route("**/api/chat", drawThenEdit())
@@ -700,7 +700,7 @@ test.describe("Workspace", () => {
         await waitForComplete(page)
         const canvas = getIframeContent(page)
         await canvas.getByText("Process", { exact: true }).click()
-        const ask = page.locator('[data-testid="selection-ask"]')
+        const ask = page.locator('[data-testid="selection-style"]')
         await expect(ask).toBeVisible()
         await canvas.locator('.geSimpleMainMenu a[title="Insert"]').click()
         await expect(canvas.locator(".mxPopupMenu").first()).toBeVisible()
@@ -737,6 +737,63 @@ test.describe("Workspace", () => {
         await page.keyboard.press("ControlOrMeta+e")
         await expect(canvas.locator(".geDialog").first()).toBeVisible()
         await expect(ask).toBeHidden()
+    })
+
+    test("the style button next to a selection opens draw.io's format panel", async ({
+        page,
+    }) => {
+        await page.route("**/api/chat", drawThenEdit())
+        await openApp(page)
+        await sendMessage(page, "Create a flowchart")
+        await waitForComplete(page)
+        const canvas = getIframeContent(page)
+        const formatWidth = () =>
+            canvas
+                .locator(".geFormatContainer")
+                .evaluate((el) => (el as HTMLElement).offsetWidth)
+        expect(await formatWidth()).toBe(0)
+        await canvas.getByText("Process", { exact: true }).click()
+        const style = page.locator('[data-testid="selection-style"]')
+        await expect(style).toBeVisible()
+        // The chat panel is open: its input shows the selection instead
+        await expect(page.locator('[data-testid="selection-ask"]')).toHaveCount(
+            0,
+        )
+        await style.click()
+        await expect.poll(formatWidth).toBeGreaterThan(0)
+        await expect(style).toBeHidden()
+        // Closed from draw.io's own toolbar: the button is back
+        await canvas
+            .locator('.geSimpleMainMenu a[title^="Format"]')
+            .first()
+            .click()
+        await expect.poll(formatWidth).toBe(0)
+        await expect(style).toBeVisible()
+    })
+
+    test("with the chat panel hidden, a selection also offers ask AI, which opens the panel", async ({
+        page,
+    }) => {
+        await page.route("**/api/chat", drawThenEdit())
+        await openApp(page)
+        await sendMessage(page, "Create a flowchart")
+        await waitForComplete(page)
+        await page.getByRole("button", { name: "Hide chat panel" }).click()
+        await expect(page.locator('[data-testid="show-panel"]')).toBeVisible()
+        await getIframeContent(page)
+            .getByText("Process", { exact: true })
+            .click()
+        const ask = page.locator('[data-testid="selection-ask"]')
+        await expect(ask).toBeVisible()
+        await expect(
+            page.locator('[data-testid="selection-style"]'),
+        ).toBeVisible()
+        await ask.click()
+        await expect(getChatInput(page)).toBeFocused()
+        await expect(
+            page.locator('[data-testid="selection-chip"]'),
+        ).toContainText("Process")
+        await expect(ask).toHaveCount(0)
     })
 
     test("with the chat panel hidden, draw.io's right-hand buttons can be clicked", async ({
@@ -3739,48 +3796,50 @@ test.describe("Edge cases", () => {
         ).toBeVisible()
     })
 
-    test("a saved prompt sent while a link is still read keeps the draft", async ({
+    test("a saved prompt fills the message box and is sent from there", async ({
         page,
     }) => {
-        let releaseUrl: () => void = () => {}
-        await page.route("**/api/parse-url", async (route) => {
-            await new Promise<void>((resolve) => {
-                releaseUrl = resolve
-            })
-            await route.fulfill({
-                status: 200,
-                json: { title: "Spec", content: "text", charCount: 4 },
-            })
-        })
-        await page.route("**/api/chat", drawThenEdit())
+        const prompts = await recordPrompts(page)
         await openApp(page)
         await sendMessage(page, "First")
         await waitForComplete(page)
-        await getChatInput(page).fill("Template prompt")
-        await page.getByRole("button", { name: "Add", exact: true }).click()
-        await page.getByText("Save this prompt").click()
-        await page.getByRole("button", { name: "Save prompt" }).click()
-        await page.waitForTimeout(500)
-        // A draft, and a link still being read
-        await getChatInput(page).fill("My draft")
-        await page.getByRole("button", { name: "Add", exact: true }).click()
-        await page.getByText("Extract from URL").click()
-        await page
-            .getByPlaceholder("https://example.com/article")
-            .fill("https://example.com/spec")
-        await page.getByRole("button", { name: "Extract", exact: true }).click()
-        await page.waitForTimeout(300)
-        await page.keyboard.press("Escape")
+        await saveTemplate(page)
         await page.getByRole("button", { name: "Saved prompts" }).click()
         await page.getByText("Template prompt").first().click()
-        await page.getByRole("button", { name: "Send prompt" }).click()
-        await expect(
-            page.getByText(
-                "Attachments are still being read. Send again when they are ready.",
-            ),
-        ).toBeVisible()
+        await expect(page.getByRole("dialog")).toBeHidden()
+        await expect(getChatInput(page)).toHaveValue("Template prompt")
+        await expect(getChatInput(page)).toBeFocused()
+        await page.waitForTimeout(500)
+        expect(prompts).toEqual(["First"])
+        // Changed in the box, then sent as usual
+        await page.keyboard.type(" for a shop")
+        await page.keyboard.press("Enter")
+        await expect.poll(() => prompts.length).toBe(2)
+        expect(prompts[1]).toBe("Template prompt for a shop")
+        await page.getByRole("button", { name: "Saved prompts" }).click()
+        await expect(page.getByRole("dialog").getByText("1 uses")).toBeVisible()
+    })
+
+    test("a saved prompt picked over typed text replaces it only when confirmed", async ({
+        page,
+    }) => {
+        const prompts = await recordPrompts(page)
+        await openApp(page)
+        await sendMessage(page, "First")
+        await waitForComplete(page)
+        await saveTemplate(page)
+        await getChatInput(page).fill("My draft")
+        await page.getByRole("button", { name: "Saved prompts" }).click()
+        await page.getByText("Template prompt").first().click()
+        await expect(page.getByText("Replace current input?")).toBeVisible()
+        await page.getByRole("button", { name: "Cancel" }).click()
+        await expect(page.getByText("Replace current input?")).toBeHidden()
         await expect(getChatInput(page)).toHaveValue("My draft")
-        releaseUrl()
+        await page.getByText("Template prompt").first().click()
+        await page.getByRole("button", { name: "Replace", exact: true }).click()
+        await expect(getChatInput(page)).toHaveValue("Template prompt")
+        await expect(page.getByRole("dialog")).toBeHidden()
+        expect(prompts).toEqual(["First"])
     })
 
     test("a hand move made before an AI change is undone after it", async ({
@@ -4087,42 +4146,6 @@ test.describe("Edge cases", () => {
         ).toBeVisible()
         await page.waitForTimeout(500)
         await expect(chip).toHaveCount(0)
-    })
-
-    test("a saved prompt sent while the diagram exports does not lose the message", async ({
-        page,
-    }) => {
-        await page.addInitScript(() => {
-            window.addEventListener("message", (event) => {
-                if (
-                    (window as any).__dropExports &&
-                    typeof event.data === "string" &&
-                    event.data.includes('"event":"export"')
-                ) {
-                    event.stopImmediatePropagation()
-                }
-            })
-        })
-        await page.route("**/api/chat", drawThenEdit())
-        await openApp(page)
-        await sendMessage(page, "First")
-        await waitForComplete(page)
-        await getChatInput(page).fill("Template prompt")
-        await page.getByRole("button", { name: "Add", exact: true }).click()
-        await page.getByText("Save this prompt").click()
-        await page.getByRole("button", { name: "Save prompt" }).click()
-        await page.waitForTimeout(500)
-        await page.evaluate(() => {
-            ;(window as any).__dropExports = true
-        })
-        await sendMessage(page, "My message")
-        await page.waitForTimeout(300)
-        await page.getByRole("button", { name: "Saved prompts" }).click()
-        await page.getByText("Template prompt").first().click()
-        // The export times out: the message comes back
-        await expect(getChatInput(page)).toHaveValue("My message", {
-            timeout: 20000,
-        })
     })
 
     test("a reply of the chat left that ends late starts no request in the chat on screen", async ({
@@ -4444,45 +4467,6 @@ test.describe("Edge cases", () => {
         await expect(canvas.getByText("BeeOne", { exact: true })).toBeVisible()
     })
 
-    test("a saved prompt sent while a message is prepared says why nothing happens", async ({
-        page,
-    }) => {
-        await page.addInitScript(() => {
-            window.addEventListener("message", (event) => {
-                if (
-                    (window as any).__dropExports &&
-                    typeof event.data === "string" &&
-                    event.data.includes('"event":"export"')
-                ) {
-                    event.stopImmediatePropagation()
-                }
-            })
-        })
-        await page.route("**/api/chat", drawThenEdit())
-        await openApp(page)
-        await sendMessage(page, "First")
-        await waitForComplete(page)
-        await getChatInput(page).fill("Template prompt")
-        await page.getByRole("button", { name: "Add", exact: true }).click()
-        await page.getByText("Save this prompt").click()
-        await page.getByRole("button", { name: "Save prompt" }).click()
-        await page.waitForTimeout(500)
-        await page.evaluate(() => {
-            ;(window as any).__dropExports = true
-        })
-        await sendMessage(page, "My message")
-        await page.waitForTimeout(300)
-        await page.getByRole("button", { name: "Saved prompts" }).click()
-        await page.getByText("Template prompt").first().click()
-        await expect(
-            page
-                .getByRole("region", { name: /Notifications/ })
-                .getByText(
-                    "The last message is still being sent. Try again in a moment.",
-                ),
-        ).toBeVisible()
-    })
-
     test("an example drawn into a blank file with variables keeps its undo", async ({
         page,
     }) => {
@@ -4557,212 +4541,6 @@ test.describe("Edge cases", () => {
         await expect(chip).toContainText("Process")
     })
 
-    test("Enter while the last message is still being sent says so; a saved prompt then is not counted", async ({
-        page,
-    }) => {
-        await page.addInitScript(() => {
-            window.addEventListener("message", (event) => {
-                if (
-                    (window as any).__dropExports &&
-                    typeof event.data === "string" &&
-                    event.data.includes('"event":"export"')
-                ) {
-                    event.stopImmediatePropagation()
-                }
-            })
-        })
-        await page.route("**/api/chat", drawThenEdit())
-        await openApp(page)
-        await sendMessage(page, "First")
-        await waitForComplete(page)
-        await getChatInput(page).fill("Template prompt")
-        await page.getByRole("button", { name: "Add", exact: true }).click()
-        await page.getByText("Save this prompt").click()
-        await page.getByRole("button", { name: "Save prompt" }).click()
-        await page.waitForTimeout(500)
-        await page.evaluate(() => {
-            ;(window as any).__dropExports = true
-        })
-        await sendMessage(page, "My message")
-        await page.waitForTimeout(300)
-        const notice = page
-            .getByRole("region", { name: /Notifications/ })
-            .getByText(
-                "The last message is still being sent. Try again in a moment.",
-            )
-        await sendMessage(page, "More words")
-        await expect(notice).toBeVisible()
-        await expect(getChatInput(page)).toHaveValue("More words")
-        await getChatInput(page).fill("")
-        await page.getByRole("button", { name: "Saved prompts" }).click()
-        await page.getByText("Template prompt").first().click()
-        await page.waitForTimeout(500)
-        await page.getByRole("button", { name: "Saved prompts" }).click()
-        await expect(
-            page.getByRole("dialog").getByText("Not used yet"),
-        ).toBeVisible()
-    })
-
-    test("a saved prompt whose own send fails is not counted as used", async ({
-        page,
-    }) => {
-        await page.addInitScript(() => {
-            window.addEventListener("message", (event) => {
-                if (
-                    (window as any).__dropExports &&
-                    typeof event.data === "string" &&
-                    event.data.includes('"event":"export"')
-                ) {
-                    event.stopImmediatePropagation()
-                }
-            })
-        })
-        await page.route("**/api/chat", (route) =>
-            route.fulfill({
-                status: 200,
-                contentType: "text/event-stream",
-                body: createMockSSEResponse(boxCell("a", "Alpha", 40), "Here."),
-            }),
-        )
-        await openApp(page)
-        await sendMessage(page, "First")
-        await waitForComplete(page)
-        await saveTemplate(page)
-        await page.evaluate(() => {
-            ;(window as any).__dropExports = true
-        })
-        await page.getByRole("button", { name: "Saved prompts" }).click()
-        await page.getByText("Template prompt").first().click()
-        // Its export times out: the prompt comes back to the input
-        await expect(getChatInput(page)).toHaveValue("Template prompt", {
-            timeout: 20000,
-        })
-        await page.waitForTimeout(500)
-        await getChatInput(page).fill("")
-        await page.getByRole("button", { name: "Saved prompts" }).click()
-        await expect(
-            page.getByRole("dialog").getByText("Not used yet"),
-        ).toBeVisible()
-    })
-
-    test("a saved prompt clicked as the last message goes out does not start a second answer", async ({
-        page,
-    }) => {
-        await page.addInitScript(() => {
-            const w = window as any
-            const held: MessageEvent[] = []
-            w.__releaseExports = () => {
-                w.__holdExports = false
-                for (const e of held.splice(0)) {
-                    const copy = new MessageEvent("message", {
-                        data: e.data,
-                        origin: e.origin,
-                        source: e.source,
-                    })
-                    ;(copy as any).__released = true
-                    window.dispatchEvent(copy)
-                }
-            }
-            window.addEventListener("message", (event) => {
-                if (
-                    w.__holdExports &&
-                    !(event as any).__released &&
-                    typeof event.data === "string" &&
-                    event.data.includes('"event":"export"')
-                ) {
-                    event.stopImmediatePropagation()
-                    held.push(event)
-                }
-            })
-            // Keeps the saved prompts' store busy, so the panel's run count waits
-            w.__blockTemplates = () =>
-                new Promise<void>((started) => {
-                    const request = indexedDB.open("next-ai-drawio-templates")
-                    request.onsuccess = () => {
-                        const db = request.result
-                        const tx = db.transaction("templates", "readwrite")
-                        const store = tx.objectStore("templates")
-                        w.__blocking = true
-                        const spin = () => {
-                            if (!w.__blocking) return
-                            store.get("none").onsuccess = spin
-                        }
-                        spin()
-                        started()
-                    }
-                })
-            const sse = (events: object[]) =>
-                events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("")
-            const realFetch = window.fetch
-            w.__requests = 0
-            window.fetch = async (input, init) => {
-                const url = input instanceof Request ? input.url : String(input)
-                if (!url.endsWith("/api/chat")) return realFetch(input, init)
-                const n = ++w.__requests
-                const body = new ReadableStream({
-                    async start(c) {
-                        c.enqueue(
-                            new TextEncoder().encode(
-                                sse([
-                                    { type: "start" },
-                                    { type: "text-start", id: `t${n}` },
-                                    {
-                                        type: "text-delta",
-                                        id: `t${n}`,
-                                        delta: `Answer ${n}.`,
-                                    },
-                                ]),
-                            ),
-                        )
-                        await new Promise((r) =>
-                            setTimeout(r, n === 1 ? 100 : 6000),
-                        )
-                        c.enqueue(
-                            new TextEncoder().encode(
-                                sse([
-                                    { type: "text-end", id: `t${n}` },
-                                    { type: "finish" },
-                                ]) + "data: [DONE]\n\n",
-                            ),
-                        )
-                        c.close()
-                    },
-                })
-                return new Response(body, {
-                    headers: { "content-type": "text/event-stream" },
-                })
-            }
-        })
-        await openApp(page)
-        await sendMessage(page, "First")
-        await expect(page.getByText("Answer 1.")).toBeVisible({
-            timeout: 15000,
-        })
-        await page.waitForTimeout(1000)
-        await saveTemplate(page)
-        await page.evaluate(() => {
-            ;(window as any).__holdExports = true
-        })
-        await sendMessage(page, "Second")
-        await page.waitForTimeout(300)
-        await page.getByRole("button", { name: "Saved prompts" }).click()
-        await expect(page.getByText("Template prompt").first()).toBeVisible()
-        await page.evaluate(() => (window as any).__blockTemplates())
-        await page.getByText("Template prompt").first().click()
-        await page.waitForTimeout(300)
-        // The second message goes out and its answer starts; then the store frees up
-        await page.evaluate(() => (window as any).__releaseExports())
-        await expect(page.getByText("Answer 2.")).toBeVisible({
-            timeout: 15000,
-        })
-        await page.evaluate(() => {
-            ;(window as any).__blocking = false
-        })
-        await page.waitForTimeout(2500)
-        const requests = await page.evaluate(() => (window as any).__requests)
-        expect(requests).toBe(2)
-    })
-
     test("going back to another language's page mid-drawing sends nothing more", async ({
         page,
     }) => {
@@ -4824,147 +4602,6 @@ test.describe("Edge cases", () => {
             localStorage.getItem("__chatRequests"),
         )
         expect(count).toBe("1")
-    })
-
-    test("a saved prompt picked while an answer comes in says why it is not sent", async ({
-        page,
-    }) => {
-        await page.addInitScript(() => {
-            const w = window as any
-            const held: MessageEvent[] = []
-            w.__releaseExports = () => {
-                w.__holdExports = false
-                for (const e of held.splice(0)) {
-                    const copy = new MessageEvent("message", {
-                        data: e.data,
-                        origin: e.origin,
-                        source: e.source,
-                    })
-                    ;(copy as any).__released = true
-                    window.dispatchEvent(copy)
-                }
-            }
-            window.addEventListener("message", (event) => {
-                if (
-                    w.__holdExports &&
-                    !(event as any).__released &&
-                    typeof event.data === "string" &&
-                    event.data.includes('"event":"export"')
-                ) {
-                    event.stopImmediatePropagation()
-                    held.push(event)
-                }
-            })
-            const sse = (events: object[]) =>
-                events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("")
-            const realFetch = window.fetch
-            let n = 0
-            window.fetch = async (input, init) => {
-                const url = input instanceof Request ? input.url : String(input)
-                if (!url.endsWith("/api/chat")) return realFetch(input, init)
-                const i = ++n
-                const body = new ReadableStream({
-                    async start(c) {
-                        c.enqueue(
-                            new TextEncoder().encode(
-                                sse([
-                                    { type: "start" },
-                                    { type: "text-start", id: `t${i}` },
-                                    {
-                                        type: "text-delta",
-                                        id: `t${i}`,
-                                        delta: `Answer ${i}.`,
-                                    },
-                                ]),
-                            ),
-                        )
-                        await new Promise((r) =>
-                            setTimeout(r, i === 1 ? 100 : 8000),
-                        )
-                        c.enqueue(
-                            new TextEncoder().encode(
-                                sse([
-                                    { type: "text-end", id: `t${i}` },
-                                    { type: "finish" },
-                                ]) + "data: [DONE]\n\n",
-                            ),
-                        )
-                        c.close()
-                    },
-                })
-                return new Response(body, {
-                    headers: { "content-type": "text/event-stream" },
-                })
-            }
-        })
-        await openApp(page)
-        await sendMessage(page, "First")
-        await expect(page.getByText("Answer 1.")).toBeVisible({
-            timeout: 15000,
-        })
-        await page.waitForTimeout(1000)
-        await saveTemplate(page)
-        await page.evaluate(() => {
-            ;(window as any).__holdExports = true
-        })
-        await sendMessage(page, "Second")
-        await page.waitForTimeout(300)
-        // The list is open when the answer starts
-        await page.getByRole("button", { name: "Saved prompts" }).click()
-        await expect(page.getByText("Template prompt").first()).toBeVisible()
-        await page.evaluate(() => (window as any).__releaseExports())
-        await expect(page.getByText("Answer 2.")).toBeVisible({
-            timeout: 15000,
-        })
-        await page.getByText("Template prompt").first().click()
-        await expect(
-            page
-                .getByRole("region", { name: /Notifications/ })
-                .getByText(
-                    "An answer is still coming. Send again when it is done.",
-                ),
-        ).toBeVisible()
-    })
-
-    test("a saved prompt goes out at once, also while its run count waits for storage", async ({
-        page,
-    }) => {
-        await page.addInitScript(() => {
-            const w = window as any
-            // Keeps the saved prompts' store busy, so its counts wait
-            w.__blockTemplates = () =>
-                new Promise<void>((started) => {
-                    const request = indexedDB.open("next-ai-drawio-templates")
-                    request.onsuccess = () => {
-                        const tx = request.result.transaction(
-                            "templates",
-                            "readwrite",
-                        )
-                        const store = tx.objectStore("templates")
-                        w.__blocking = true
-                        const spin = () => {
-                            if (!w.__blocking) return
-                            store.get("none").onsuccess = spin
-                        }
-                        spin()
-                        started()
-                    }
-                })
-        })
-        const prompts = await recordPrompts(page)
-        await openApp(page)
-        await sendMessage(page, "First")
-        await waitForComplete(page)
-        await saveTemplate(page)
-        await page.getByRole("button", { name: "Saved prompts" }).click()
-        await expect(page.getByText("Template prompt").first()).toBeVisible()
-        await page.evaluate(() => (window as any).__blockTemplates())
-        await page.getByText("Template prompt").first().click()
-        await expect.poll(() => prompts.length, { timeout: 10000 }).toBe(2)
-        expect(prompts[1]).toBe("Template prompt")
-        await page.evaluate(() => {
-            ;(window as any).__blocking = false
-        })
     })
 
     test("a chat opened from its link shows its cut off drawing as failed", async ({

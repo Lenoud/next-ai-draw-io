@@ -737,6 +737,18 @@ describe("preview page", () => {
         // It holds the process's token
         expect(res.headers["cache-control"]).toBe("no-store")
     })
+
+    it("lets pages on this machine frame the preview with DRAWIO_ALLOW_EMBED=true", async () => {
+        process.env.DRAWIO_ALLOW_EMBED = "true"
+        try {
+            const res = await request("/?mcp=mcp-test-embed")
+            expect(res.headers["content-security-policy"]).toBe(
+                "frame-ancestors 'self' localhost:* 127.0.0.1:*",
+            )
+        } finally {
+            delete process.env.DRAWIO_ALLOW_EMBED
+        }
+    })
 })
 
 describe("API token", () => {
@@ -997,6 +1009,15 @@ describe("canvas shell page", () => {
         const slash = await request("/shell?mcp=mcp-shell-recent")
         expect(slash.status).toBe(302)
         expect(slash.headers.location).toBe("/shell/?mcp=mcp-shell-recent")
+    })
+
+    it("goes to the session id a link starts with when text is glued onto it", async () => {
+        // DSH's chat made "…?mcp=mcp-mvx2w3vx-njlslo。截图…" one link
+        const res = await request(
+            `/shell/?mcp=${encodeURIComponent("mcp-mvx2w3vx-njlslo。截图因为预览页没打开")}`,
+        )
+        expect(res.status).toBe(302)
+        expect(res.headers.location).toBe("/shell/?mcp=mcp-mvx2w3vx-njlslo")
     })
 
     it("serves the shell's files with their MIME types, without a token", async () => {
