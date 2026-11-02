@@ -51,6 +51,7 @@ export function attachEditor(editorUi: EditorUi, frameWindow: FrameWindow) {
     quietUnload()
     confirmDeleteAll()
     nameEmbedFiles()
+    savePdfsOnDesktop()
     useCanvasStore.getState().set({ hasEditor: true })
     syncAll()
 }
@@ -136,6 +137,50 @@ function nameEmbedFiles() {
     proto.getTitle = wrapped
 }
 
+// Desktop app: draw.io makes a PDF by printing its preview window, which
+// Electron sends to the system print dialog (fixed paper sizes, so the crop
+// size is lost and wide diagrams are turned). Export in the PDF dialog saves
+// the preview with Electron's printToPDF instead; File > Print still prints.
+function savePdfsOnDesktop() {
+    const save = window.electronAPI?.savePreviewAsPdf
+    const dialog = win?.PrintDialog
+    const printPreview = dialog?.printPreview
+    if (!save || typeof printPreview !== "function" || printPreview.naiWrapped)
+        return
+    // Both dialogs end in printPreview: which one is open
+    let forPdf = false
+    for (const [name, pdf] of [
+        ["exportPdf", true],
+        ["print", false],
+    ] as const) {
+        const action = ui?.actions?.get?.(name)
+        const funct = action?.funct
+        if (typeof funct !== "function") continue
+        action.funct = function (this: unknown, ...args: unknown[]) {
+            forPdf = pdf
+            return funct.apply(this, args)
+        }
+    }
+    const wrapped = (preview: any) => {
+        const wnd = preview?.wnd
+        if (!forPdf || !wnd) return printPreview(preview)
+        const title = ui?.getCurrentFile?.()?.getTitle?.() || "diagram"
+        const run = () =>
+            save(`${title}.pdf`).catch((error) => {
+                console.warn(`[drawio] PDF export failed: ${error}`)
+                printPreview(preview)
+            })
+        // As draw.io waits before printing: images and fonts in the preview
+        if (typeof dialog.waitForResources === "function") {
+            dialog.waitForResources(wnd, run, dialog.printTimeout)
+        } else {
+            run()
+        }
+    }
+    wrapped.naiWrapped = true
+    dialog.printPreview = wrapped
+}
+
 // draw.io's simple UI opens or closes its format panel and shape library
 // when its window crosses a width; the user opens them from its toolbar, so
 // a resize (the chat panel sliding, a narrow window) must leave them alone.
@@ -198,8 +243,19 @@ export function detachEditor() {
         hasEditor: false,
         selection: [],
         selectionRect: null,
+        isFormatOpen: false,
         isDrawioPopupOpen: false,
     })
+}
+
+/** Opens draw.io's format panel, where the selection's colors are set */
+export function openFormatPanel() {
+    try {
+        if (!isFormatPanelOpen()) ui?.actions?.get?.("format")?.funct()
+    } catch {
+        // ignore
+    }
+    syncAll()
 }
 
 function graph() {
@@ -910,6 +966,7 @@ function syncAll() {
         selection: readSelection(),
         selectionRect: readSelectionRect(),
         isFreehand: !!g?.freehand?.isDrawing?.(),
+        isFormatOpen: isFormatPanelOpen(),
     })
 }
 
@@ -951,6 +1008,8 @@ function installListeners(): () => void {
     listen(g.model, mxEvent.CHANGE, syncAll)
     // Drawing started or stopped: the "ask AI" button hides meanwhile
     listen(g, "freehandStateChanged", syncAll)
+    // The format panel opened or closed (its toolbar button, Ctrl+Shift+P)
+    listen(ui, "formatWidthChanged", syncAll)
     listen(g.view, mxEvent.SCALE, onScale)
     listen(g.view, mxEvent.TRANSLATE, syncSelectionRect)
     listen(g.view, mxEvent.SCALE_AND_TRANSLATE, onScale)

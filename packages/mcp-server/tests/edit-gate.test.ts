@@ -126,6 +126,68 @@ describe("contentFingerprint", () => {
         expect(contentFingerprint(XML_A)).not.toBe(contentFingerprint(twoPages))
     })
 
+    it("treats coordinates of 0 like left-out ones, as draw.io writes them", () => {
+        const withEdge = (point: string) =>
+            XML_A.replace(
+                "</root>",
+                `<mxCell id="e1" edge="1" parent="1" source="box1" target="box1"><mxGeometry relative="1" as="geometry">${point}</mxGeometry></mxCell></root>`,
+            )
+        const written = withEdge('<mxPoint x="0" y="-18" as="offset"/>')
+        expect(contentFingerprint(written)).toBe(
+            contentFingerprint(withEdge('<mxPoint y="-18" as="offset"/>')),
+        )
+        expect(contentFingerprint(written)).not.toBe(
+            contentFingerprint(
+                withEdge('<mxPoint x="5" y="-18" as="offset"/>'),
+            ),
+        )
+        const atOrigin = XML_A.replace('x="40" y="40"', 'x="0" y="0"')
+        expect(contentFingerprint(atOrigin)).toBe(
+            contentFingerprint(XML_A.replace('x="40" y="40" ', "")),
+        )
+        // Other attributes of 0 are kept: a label "0" is not an empty label
+        expect(
+            contentFingerprint(XML_A.replace('value="Hello"', 'value="0"')),
+        ).not.toBe(contentFingerprint(XML_A.replace('value="Hello" ', "")))
+    })
+
+    it("reads draw.io's order of the cells, each container followed by its children, as the same diagram", () => {
+        const page = (cells: string) =>
+            `<mxfile><diagram id="p" name="Page-1"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>${cells}</root></mxGraphModel></diagram></mxfile>`
+        const group = (id: string) =>
+            `<mxCell id="${id}" value="${id}" style="swimlane;" vertex="1" parent="1"/>`
+        const child = (id: string, parent: string) =>
+            `<mxCell id="${id}" value="${id}" vertex="1" parent="${parent}"/>`
+        const wrapped = (id: string, parent: string) =>
+            `<object id="${id}" label="${id}"><mxCell vertex="1" parent="${parent}"/></object>`
+        // As a model writes it: both containers, then their children
+        const written = page(
+            group("g1") +
+                group("g2") +
+                child("a", "g1") +
+                wrapped("b", "g2") +
+                child("c", "g1"),
+        )
+        // As draw.io writes it back
+        const drawio = page(
+            group("g1") +
+                child("a", "g1") +
+                child("c", "g1") +
+                group("g2") +
+                wrapped("b", "g2"),
+        )
+        expect(contentFingerprint(written)).toBe(contentFingerprint(drawio))
+        // Siblings that swap places are still a change (front and back)
+        const swapped = page(
+            group("g1") +
+                child("c", "g1") +
+                child("a", "g1") +
+                group("g2") +
+                wrapped("b", "g2"),
+        )
+        expect(contentFingerprint(swapped)).not.toBe(contentFingerprint(drawio))
+    })
+
     it("falls back to the raw string for unparseable input", () => {
         expect(contentFingerprint("not xml at all")).toBe("not xml at all")
     })
