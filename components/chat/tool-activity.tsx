@@ -7,7 +7,7 @@ import {
     Library,
     PenTool,
 } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Shimmer } from "@/components/ai-elements/shimmer"
 import {
     SummaryLink,
@@ -16,6 +16,7 @@ import {
 import { CodeBlock } from "@/components/code-block"
 import { useDictionary } from "@/hooks/use-dictionary"
 import { useCopy } from "@/lib/clipboard"
+import { isLookupTool } from "@/lib/lookup-tools"
 import { cn, isMxCellXmlComplete } from "@/lib/utils"
 import { type DiagramVersion, useVersionsStore } from "@/stores/versions-store"
 import { useChatEngine } from "./chat-engine"
@@ -101,6 +102,17 @@ function VersionCard({
     const { copied, copy } = useCopy()
     const isEdit = part.type === "tool-edit_diagram"
     const editedSince = useVersionsStore((s) => s.editedSinceId === version.id)
+    // The newest card is at the end of the chat: its panel would open
+    // below what is visible
+    const panelRef = useRef<HTMLDivElement>(null)
+    useEffect(() => {
+        if (showCode) {
+            panelRef.current?.scrollIntoView({
+                behavior: "smooth",
+                block: "nearest",
+            })
+        }
+    }, [showCode])
 
     return (
         <VersionCardView
@@ -116,7 +128,11 @@ function VersionCard({
             }
         >
             {showCode && (
-                <div className="relative border-t border-border bg-surface-1 px-3 py-2.5">
+                // pr-11: room for the copy button beside the first lines
+                <div
+                    ref={panelRef}
+                    className="relative border-t border-border bg-surface-1 px-3 py-2.5 pr-11"
+                >
                     <button
                         type="button"
                         onClick={() => copy(toolText(part))}
@@ -262,17 +278,25 @@ export function ToolActivity({
     // The answer ended before the call did (stopped, network error)
     const running = isLastMessage && engine.isBusy
 
-    if (toolName === "get_shape_library" && state !== "output-error") {
+    if (isLookupTool(toolName) && state !== "output-error") {
         const isDone = state === "output-available"
+        // A shape library, or the drawing guide of a diagram type
+        const isGuide = toolName === "get_diagram_guide"
         return (
             <ToolRow
                 part={part}
                 icon={<Library />}
                 label={
                     isDone ? (
-                        t.libraryLoaded
+                        isGuide ? (
+                            t.guideLoaded
+                        ) : (
+                            t.libraryLoaded
+                        )
                     ) : running ? (
-                        <Shimmer as="span">{t.loadingLibrary}</Shimmer>
+                        <Shimmer as="span">
+                            {isGuide ? t.loadingGuide : t.loadingLibrary}
+                        </Shimmer>
                     ) : (
                         t.stopped
                     )

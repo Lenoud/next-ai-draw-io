@@ -29,7 +29,13 @@ export interface ChatMessageMetadata {
     /** On a user message: what it told the model about the canvas */
     diagram?: MessageDiagram
     selectedCells?: MessageSelection
+    /** The page the selected shapes are on (null: the first page);
+     * messages saved before it was kept have none */
+    selectionPageId?: string | null
     usage?: ReplyUsage
+    /** On an answer: the Langfuse trace of its latest request, which a vote
+     * on it scores */
+    traceId?: string
 }
 
 /**
@@ -75,6 +81,13 @@ export interface ChatNotice {
     /** Show a button that opens model settings, on the provider that refused */
     openModelConfig?: boolean
     providerId?: string
+    /** The server wants an access code: Settings opens on it, and the card
+     * has no Report button (as with openModelConfig, the user can fix it) */
+    accessCode?: boolean
+    /** The user's last actions when it happened, for its report */
+    actions?: string[]
+    /** The user stopped the answer: a plain line with Retry, no error card */
+    stopped?: boolean
 }
 
 export type ChatToolName = keyof InferUITools<typeof chatTools>

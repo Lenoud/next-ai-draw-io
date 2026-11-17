@@ -11,10 +11,20 @@ import { pipeline } from "node:stream"
 import { fileURLToPath } from "node:url"
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024 // 10 MiB
+// An image the preview made for export_diagram can be larger than the
+// diagram: it holds the embedded pictures again (a .drawio.svg twice, drawn
+// and as diagram data), and a PNG is drawn at twice the size
+const MAX_EXPORT_BYTES = 64 * 1024 * 1024
+
+function sendTooLarge(res: http.ServerResponse): void {
+    res.writeHead(413, { "Content-Type": "application/json" })
+    res.end(JSON.stringify({ error: "Payload too large" }))
+}
 
 function readBody(
     req: http.IncomingMessage,
     res: http.ServerResponse,
+    maxBytes: number,
     cb: (body: string) => void,
 ): void {
     // Decode once at the end: a multi-byte UTF-8 character can be split
@@ -25,7 +35,7 @@ function readBody(
     req.on("data", (chunk: Buffer) => {
         if (tooLarge) return
         size += chunk.length
-        if (size > MAX_BODY_BYTES) {
+        if (size > maxBytes) {
             // Read the rest without keeping it and answer at the end: a
             // connection closed mid-upload reaches the browser as a network
             // error, without this answer
@@ -37,8 +47,7 @@ function readBody(
     })
     req.on("end", () => {
         if (tooLarge) {
-            res.writeHead(413, { "Content-Type": "application/json" })
-            res.end(JSON.stringify({ error: "Payload too large" }))
+            sendTooLarge(res)
             return
         }
         cb(Buffer.concat(chunks).toString("utf8"))
@@ -46,7 +55,7 @@ function readBody(
 }
 
 import { isDrawioTheme, toDrawioLang } from "./drawio-themes.ts"
-import { contentFingerprint } from "./edit-gate.ts"
+import { contentFingerprint, describeChanges } from "./edit-gate.ts"
 import {
     addHistory,
     clearHistory,
@@ -126,6 +135,50 @@ export function previewUiFromEnv(
 
 export const PREVIEW_UI: PreviewUi = previewUiFromEnv()
 
+/** One explicitly trusted preview origin, never a path or proxy header. */
+export function previewOriginFromEnv(
+    env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+    const value = env.DRAWIO_PREVIEW_URL
+    if (value === undefined) return undefined
+    let url: URL
+    try {
+        url = new URL(value)
+    } catch {
+        throw new Error("DRAWIO_PREVIEW_URL must be an absolute origin URL")
+    }
+    if (
+        value !== value.trim() ||
+        !/^https?:\/\//.test(value) ||
+        url.username ||
+        url.password ||
+        url.pathname !== "/" ||
+        url.search ||
+        url.hash ||
+        value.includes("?") ||
+        value.includes("#") ||
+        value.includes("\\") ||
+        (url.protocol !== "https:" &&
+            !(
+                url.protocol === "http:" &&
+                ["localhost", "127.0.0.1"].includes(url.hostname)
+            ))
+    ) {
+        throw new Error(
+            "DRAWIO_PREVIEW_URL must be an HTTPS origin without credentials, path, query or fragment (HTTP is allowed only for localhost or 127.0.0.1)",
+        )
+    }
+    // Reject normalized paths (e.g. /a/..) as well as actual subpaths.
+    if (value !== url.origin && value !== `${url.origin}/`) {
+        throw new Error(
+            "DRAWIO_PREVIEW_URL must use its canonical origin, optionally followed by /",
+        )
+    }
+    return url.origin
+}
+
+const PREVIEW_ORIGIN = previewOriginFromEnv()
+
 /**
  * The page start_session actually opens: the classic page stands in while
  * the shell is not built (a run from the sources), as embed.diagrams.net
@@ -141,7 +194,7 @@ export function previewUrl(
     ui: PreviewUi = PREVIEW_UI,
 ): string {
     const path = activePreviewUi(ui) === "shell" ? "/shell/" : ""
-    return `http://localhost:${port}${path}?mcp=${sessionId}`
+    return `${PREVIEW_ORIGIN ?? `http://localhost:${port}`}${path}?mcp=${sessionId}`
 }
 
 /**
@@ -249,6 +302,11 @@ interface SessionState {
     // The browser saved a change of the user's since that write (a sync
     // reply is no change)
     userEdited?: boolean
+    // Hand edits that lost to a write of the model's and are in History
+    // only, each as a sentence for the model's next tool result
+    // (takeLostEdits). Dropped when the user changes the canvas again or
+    // restores a version: they have then seen it without that edit
+    lostEdits?: string[]
     lastUpdated: Date
     lastPolled?: number // Last browser poll; an open tab keeps the session alive
     svg?: string // Cached SVG from last browser save
@@ -269,7 +327,9 @@ export type ExportFormat = "png" | "svg" | "xmlsvg"
  * draw.io's export takes these directly: width caps the image size (never
  * upscales), pageId renders a page other than the one on screen (both PNG
  * only), border is the margin, background the color behind a page that has
- * none, transparent leaves a PNG without any.
+ * none, transparent leaves the image without any, theme "light" keeps an
+ * SVG from following the viewer's dark mode. (For an SVG draw.io reads the
+ * background its own way: the shell translates, mcp-sync-core.ts.)
  */
 export interface ExportOptions {
     width?: number
@@ -277,6 +337,7 @@ export interface ExportOptions {
     border?: number
     background?: string
     transparent?: boolean
+    theme?: "light"
 }
 
 const stateStore = new Map<string, SessionState>()
@@ -355,6 +416,7 @@ export function setState(
         serverVersion: fromBrowser ? existing?.serverVersion : newVersion,
         serverXml: fromBrowser ? existing?.serverXml : xml,
         userEdited: fromBrowser ? existing?.userEdited : false,
+        lostEdits: existing?.lostEdits,
         lastUpdated: new Date(),
         lastPolled: existing?.lastPolled,
         // The image of this XML, never an older one's: a write without an
@@ -542,38 +604,45 @@ function handleSelectionResult(
     log.debug(`Selection received for session=${sessionId}`)
 }
 
-export function startHttpServer(port = 6002): Promise<number> {
+export function startHttpServer(
+    port = 6002,
+    firstPort = port,
+): Promise<number> {
     return new Promise((resolve, reject) => {
         if (server) {
             resolve(serverPort)
             return
         }
 
-        serverPort = port
-        server = http.createServer(handleRequest)
+        const starting = http.createServer(handleRequest)
 
-        server.on("error", (err: NodeJS.ErrnoException) => {
-            if (err.code === "EADDRINUSE") {
-                if (port >= MAX_PORT) {
-                    reject(
-                        new Error(
-                            `No available ports in range 6002-${MAX_PORT}`,
-                        ),
-                    )
-                    return
-                }
-                log.info(`Port ${port} in use, trying ${port + 1}`)
-                server = null
-                startHttpServer(port + 1)
-                    .then(resolve)
-                    .catch(reject)
-            } else {
+        starting.on("error", (err: NodeJS.ErrnoException) => {
+            // A server that did not start is forgotten, so the next
+            // start_session tries again; kept, that call answered with the
+            // port as if the preview were served there. (A running server
+            // can report an error too, and stays.)
+            if (!starting.listening) server = null
+            if (err.code !== "EADDRINUSE") {
                 reject(err)
+                return
             }
+            if (port >= MAX_PORT) {
+                reject(
+                    new Error(
+                        port === firstPort
+                            ? `Port ${port} is in use. The next free port is tried only up to ${MAX_PORT}: set PORT to a free port.`
+                            : `Ports ${firstPort} to ${port} are all in use. Set PORT to a free port.`,
+                    ),
+                )
+                return
+            }
+            log.info(`Port ${port} in use, trying ${port + 1}`)
+            startHttpServer(port + 1, firstPort)
+                .then(resolve)
+                .catch(reject)
         })
 
-        server.listen(port, "127.0.0.1", () => {
-            serverPort = port
+        starting.listen(port, "127.0.0.1", () => {
             log.info(`HTTP server running on http://localhost:${port}`)
             if (!EXTERNAL_DRAWIO && drawioDir === null) {
                 log.warn(
@@ -587,6 +656,10 @@ export function startHttpServer(port = 6002): Promise<number> {
             }
             resolve(port)
         })
+        // Kept once listen() has taken the port number: for a PORT that is
+        // no port it throws, and the next call must not find a server
+        server = starting
+        serverPort = port
     })
 }
 
@@ -639,7 +712,8 @@ function handleRequest(
     }
 }
 
-// Serve only requests addressed to localhost, sent by the preview page
+// Serve only requests addressed to localhost or the explicit preview origin,
+// sent by the preview page
 // itself (Origin is the address it was opened at, the Host) or by a
 // non-browser client (no Origin header). This blocks DNS rebinding, other
 // websites, and pages on other localhost ports, whose plain text POSTs need
@@ -647,6 +721,9 @@ function handleRequest(
 function isLocalRequest(req: http.IncomingMessage): boolean {
     const host = req.headers.host ?? ""
     const origin = req.headers.origin
+    if (PREVIEW_ORIGIN && host === new URL(PREVIEW_ORIGIN).host) {
+        return origin === undefined || origin === PREVIEW_ORIGIN
+    }
     return (
         /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host) &&
         (origin === undefined || origin === `http://${host}`)
@@ -674,7 +751,10 @@ function routeRequest(
     }
 
     const requestOrigin = req.headers.origin
-    if (requestOrigin === `http://localhost:${serverPort}`) {
+    if (
+        requestOrigin === `http://localhost:${serverPort}` ||
+        (PREVIEW_ORIGIN !== undefined && requestOrigin === PREVIEW_ORIGIN)
+    ) {
         res.setHeader("Access-Control-Allow-Origin", requestOrigin)
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         res.setHeader(
@@ -775,8 +855,12 @@ function servePage(
     if (!sessionId) {
         const recentSessionId = getMostRecentSessionId()
         if (recentSessionId) {
+            // An address typed without a path ("localhost:6002") opens the
+            // page start_session opens: on the classic page at "/" the
+            // changes are not outlined and get_selection gets no answer
+            const path = activePreviewUi() === "shell" ? "/shell/" : pagePath
             res.writeHead(302, {
-                Location: `${pagePath}?mcp=${encodeURIComponent(recentSessionId)}`,
+                Location: `${path}?mcp=${encodeURIComponent(recentSessionId)}`,
             })
             res.end()
             return
@@ -838,7 +922,9 @@ function handleStateApi(
             }),
         )
     } else if (req.method === "POST") {
-        readBody(req, res, (body) => {
+        // Read up to the size of an export result: what the body is shows
+        // only once it is read, and anything else keeps the usual limit
+        readBody(req, res, MAX_EXPORT_BYTES, (body) => {
             try {
                 const data = JSON.parse(body)
                 const { sessionId } = data
@@ -869,6 +955,12 @@ function handleStateApi(
                     }
                     res.writeHead(200, { "Content-Type": "application/json" })
                     res.end(JSON.stringify({ success: true }))
+                    return
+                }
+
+                // A diagram over the limit; the page tells the user
+                if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
+                    sendTooLarge(res)
                     return
                 }
 
@@ -947,9 +1039,46 @@ function handleStateApi(
                         if (current) current.syncRequested = undefined
                     } else if (typeof data.xml === "string" && data.xml) {
                         // A user edit lost the race with an AI write. Keep
-                        // it in history so the user can restore it.
-                        addHistory(sessionId, data.xml, data.svg || "", "user")
+                        // it in history so the user can restore it, with
+                        // the entry it was made on: the one before the
+                        // first write that came after its version
+                        const history = getHistory(sessionId)
+                        const at = history.findIndex(
+                            (e) => (e.version ?? 0) > data.baseVersion,
+                        )
+                        const lostTo = history[at]
+                        const base = at > 0 ? history[at - 1] : undefined
+                        // No entry has a later version when the write that
+                        // refuses the edit changed nothing (History held its
+                        // document already): the edit was made on that
+                        // document
+                        const baseXml =
+                            base?.xml ??
+                            (at === -1 ? current?.serverXml : undefined)
+                        addHistory(
+                            sessionId,
+                            data.xml,
+                            data.svg || "",
+                            "user",
+                            { basedOn: base?.id },
+                        )
                         savedToHistory = true
+                        // A write of the model's replaced it (a restore is
+                        // the user's own choice): the model is told
+                        const lost =
+                            baseXml && lostTo?.source !== "restore"
+                                ? describeChanges(
+                                      baseXml,
+                                      data.xml,
+                                      "While you were writing, the user changed the diagram by hand",
+                                  )
+                                : ""
+                        if (current && lost) {
+                            current.lostEdits = [
+                                ...(current.lostEdits ?? []),
+                                lost,
+                            ]
+                        }
                         if (current) stateListener?.(sessionId, current.xml)
                     }
                     res.writeHead(409, { "Content-Type": "application/json" })
@@ -971,6 +1100,7 @@ function handleStateApi(
                 const saved = stateStore.get(sessionId)
                 if (saved && data.source !== "sync") {
                     saved.userEdited = true
+                    saved.lostEdits = undefined
                     markFileChanged(sessionId)
                 }
                 res.writeHead(200, { "Content-Type": "application/json" })
@@ -1026,6 +1156,7 @@ function handleHistoryApi(
                 xml: entry.xml,
                 source: entry.source ?? null,
                 firstId: firstIds.get(entry.id),
+                basedOn: entry.basedOn,
             })),
             count: history.length,
             stateId: state?.stateId ?? null,
@@ -1058,10 +1189,25 @@ export function restoreHistoryEntry(
         keepInHistory(sessionId, current.xml, current.svg)
     }
     const newVersion = setState(sessionId, entry.xml)
-    addHistory(sessionId, entry.xml, entry.svg, "restore")
+    addHistory(sessionId, entry.xml, entry.svg, "restore", {
+        version: newVersion,
+    })
+    const restored = stateStore.get(sessionId)
+    if (restored) restored.lostEdits = undefined
 
     log.info(`Restored session ${sessionId} to history entry ${entryId}`)
     return newVersion
+}
+
+/**
+ * The hand edits that lost to a write of the model's since the last call
+ * (see SessionState.lostEdits), each told once
+ */
+export function takeLostEdits(sessionId: string): string[] {
+    const state = stateStore.get(sessionId)
+    const lost = state?.lostEdits ?? []
+    if (state) state.lostEdits = undefined
+    return lost
 }
 
 function handleRestoreApi(
@@ -1074,7 +1220,7 @@ function handleRestoreApi(
         return
     }
 
-    readBody(req, res, (body) => {
+    readBody(req, res, MAX_BODY_BYTES, (body) => {
         try {
             const data = JSON.parse(body)
             const { sessionId, id } = data
@@ -1122,7 +1268,7 @@ function handleHistorySvgApi(
         return
     }
 
-    readBody(req, res, (body) => {
+    readBody(req, res, MAX_BODY_BYTES, (body) => {
         try {
             const { sessionId, svg, stateId, version } = JSON.parse(body)
             if (!sessionId || !svg) {
@@ -1364,6 +1510,7 @@ export function shellConfig(
         drawioLang: settings.lang,
         drawioDark: settings.dark,
         lang: env.DRAWIO_LANG ?? "",
+        version: PACKAGE_VERSION,
     }
 }
 

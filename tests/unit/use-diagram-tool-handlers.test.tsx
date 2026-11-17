@@ -48,9 +48,11 @@ describe("the screenshot check and Stop", () => {
     const draw = async (opts: {
         watchStop: () => () => boolean
         validateDiagram: () => Promise<any>
-        captureValidationPng?: () => Promise<string>
+        captureValidationPng?: (pageId?: string | null) => Promise<string>
         // Checks already made in this user turn
         retryCount?: { current: number }
+        // The page the user was on when the message was sent
+        turnPageId?: string
     }) => {
         const onValidationStateChange = vi.fn()
         const { result } = renderHook(() =>
@@ -61,6 +63,7 @@ describe("the screenshot check and Stop", () => {
                 processedToolCallsRef: { current: new Set() },
                 validationRetryCountRef: opts.retryCount ?? { current: 0 },
                 chartXMLRef: { current: "" },
+                turnPageIdRef: { current: opts.turnPageId ?? null },
                 onDisplayChart: () => null,
                 onFetchChart: async () => "",
                 enableVlmValidation: true,
@@ -135,6 +138,24 @@ describe("the screenshot check and Stop", () => {
         }
         // Passed checks count too
         expect(validateDiagram).toHaveBeenCalledTimes(3)
+    })
+
+    it("takes the screenshot of the page the model drew on", async () => {
+        // The user may look at another page by the time it is taken
+        const captureValidationPng = vi.fn(
+            async () => "data:image/png;base64,AA",
+        )
+        await draw({
+            watchStop: () => () => false,
+            validateDiagram: async () => ({
+                valid: true,
+                issues: [],
+                suggestions: [],
+            }),
+            captureValidationPng,
+            turnPageId: "page-2",
+        })
+        expect(captureValidationPng).toHaveBeenCalledWith("page-2")
     })
 
     it("skips the check when Stop came during the screenshot", async () => {
@@ -236,6 +257,96 @@ describe("display_diagram and undo", () => {
         await call("display_diagram", { xml: box("2") })
         expect(onDisplayChart.mock.calls.map((c) => c[2])).toEqual(["commit"])
     })
+
+    it("draws a diagram whose last cell lacks its slash, as the MCP server does", async () => {
+        const { refs, onDisplayChart, addToolOutput, call } = setup("")
+        await call("display_diagram", {
+            xml: '<mxCell id="2" value="A" x="40" y="40" w="120" h="60"/><mxCell id="3" value="B" vertex="1" parent="1" x="240" y="40" w="120" h="60">',
+        })
+        // Not taken for output that was cut off
+        expect(refs.partialXmlRef.current).toBe("")
+        expect(onDisplayChart.mock.calls.map((c) => c[2])).toEqual(["commit"])
+        expect(onDisplayChart.mock.calls[0][0]).toContain('value="B"')
+        expect(addToolOutput.mock.lastCall?.[0].output).toMatch(
+            /Successfully displayed/,
+        )
+    })
+})
+
+describe("a drawing with a diagram type", () => {
+    // Two lanes; the line from A to C skips the row of B, which stands in
+    // its way
+    const lanes = `<mxCell id="2" value="One" style="swimlane;startSize=30;" x="40" y="40" w="220" h="340"/>
+<mxCell id="3" value="Two" style="swimlane;startSize=30;" x="260" y="40" w="220" h="340"/>
+<mxCell id="4" value="A" parent="2" x="40" y="50" w="140" h="60"/>
+<mxCell id="5" value="B" parent="2" x="40" y="150" w="140" h="60"/>
+<mxCell id="6" value="C" parent="2" x="40" y="250" w="140" h="60"/>
+<mxCell id="7" value="D" parent="3" x="40" y="150" w="140" h="60"/>
+<mxCell id="8" source="4" target="6"/>
+<mxCell id="9" source="4" target="7"/>`
+    const laid =
+        "The server placed the 4 steps on the grid of their lanes and gave the 2 connectors paths through the gaps between them, so no line crosses a step."
+
+    it("lays the drawing out and tells the model so", async () => {
+        const { onDisplayChart, addToolOutput, call } = setup("")
+        await call("display_diagram", { xml: lanes, type: "swimlane" })
+        // The line past B has corners now
+        expect(onDisplayChart.mock.calls[0][0]).toMatch(
+            /<mxCell id="8"[^>]*>\s*<mxGeometry[^>]*>\s*<Array as="points">/,
+        )
+        expect(addToolOutput.mock.lastCall?.[0].output).toBe(
+            `Successfully displayed the diagram. ${laid} The cells on the canvas now have these positions and paths.`,
+        )
+    })
+
+    it("only leads the connector through a shape around it when no type is named", async () => {
+        const { onDisplayChart, addToolOutput, call } = setup("")
+        await call("display_diagram", { xml: lanes })
+        const shown = onDisplayChart.mock.calls[0][0]
+        // The line past B has corners now; the steps stand where they
+        // were drawn, and the other line is as it was written
+        expect(shown).toMatch(
+            /<mxCell id="8"[^>]*>\s*<mxGeometry[^>]*>\s*<Array as="points">/,
+        )
+        expect(shown).toMatch(
+            /<mxCell id="5"[^>]*>\s*<mxGeometry[^>]*x="40"[^>]*y="150"/,
+        )
+        expect(shown).not.toMatch(
+            /<mxCell id="9"[^>]*>\s*<mxGeometry[^>]*>\s*<Array/,
+        )
+        expect(addToolOutput.mock.lastCall?.[0].output).toBe(
+            "Successfully displayed the diagram. The server gave 1 connector that passed through a shape or a text, or ran on top of another connector, a new path. The cells on the canvas now have these positions and paths.",
+        )
+    })
+
+    it("draws a drawing without such a problem as written", async () => {
+        const { onDisplayChart, addToolOutput, call } = setup("")
+        await call("display_diagram", {
+            xml: lanes.replace('<mxCell id="8" source="4" target="6"/>', ""),
+        })
+        expect(onDisplayChart.mock.calls[0][0]).not.toContain("<Array")
+        expect(addToolOutput.mock.lastCall?.[0].output).toBe(
+            "Successfully displayed the diagram.",
+        )
+    })
+
+    it("keeps the type of a cut off drawing for the call that completes it", async () => {
+        const { onDisplayChart, addToolOutput, call, append } = setup("")
+        const cut = lanes.lastIndexOf("<mxCell")
+        await call(
+            "display_diagram",
+            {
+                xml: `${lanes.slice(0, cut)}<mxCell id="9" source="4"`,
+                type: "swimlane",
+            },
+            "d1",
+        )
+        await append(' target="7"/>')
+        expect(onDisplayChart.mock.lastCall?.[0]).toContain(
+            '<Array as="points">',
+        )
+        expect(addToolOutput.mock.lastCall?.[0].output).toContain(laid)
+    })
 })
 
 describe("a cut off drawing", () => {
@@ -335,15 +446,64 @@ describe("the model's page", () => {
         expect(shapesOn(xml, "b")).toEqual([])
     })
 
+    it("edit_diagram tells the model what happened to a delete of a cell that is not there", async () => {
+        const { onDisplayChart, addToolOutput, call } = setupOn("b")
+        // The model wrote the id wrong: the box stays, and the result says so
+        await call("edit_diagram", {
+            operations: [{ operation: "delete", cell_id: "b" }],
+        })
+        expect(addToolOutput.mock.lastCall?.[0].output).toBe(
+            "Successfully applied 1 operation(s) to the diagram.\n\nNotes:\n- delete b: no cell with this id on the page (already deleted?), skipped.",
+        )
+        const [xml] = onDisplayChart.mock.calls.at(-1) as [string]
+        expect(shapesOn(xml, "b")).toEqual(["B"])
+    })
+
+    it("edit_diagram answers with one sentence when there is nothing to note", async () => {
+        const { addToolOutput, call } = setupOn("b")
+        await call("edit_diagram", {
+            operations: [{ operation: "delete", cell_id: "B" }],
+        })
+        expect(addToolOutput.mock.lastCall?.[0].output).toBe(
+            "Successfully applied 1 operation(s) to the diagram.",
+        )
+    })
+
     it("shows the model only its page when an edit fails", async () => {
         const { addToolOutput, call } = setupOn("b")
         await call("edit_diagram", {
-            operations: [{ operation: "delete", cell_id: "missing" }],
+            operations: [
+                {
+                    operation: "update",
+                    cell_id: "missing",
+                    new_xml: box("missing"),
+                },
+            ],
         })
         const output = addToolOutput.mock.lastCall?.[0]
         expect(output?.state).toBe("output-error")
         expect(output?.errorText).toContain('id="B"')
         expect(output?.errorText).not.toContain('id="A"')
+    })
+
+    it("tells the model not to draw a cell again that the user removed", async () => {
+        // The model edits a cell by the id it had before the user deleted
+        // it by hand
+        const { addToolOutput, call } = setupOn("b")
+        await call("edit_diagram", {
+            operations: [
+                {
+                    operation: "update",
+                    cell_id: "deleted",
+                    new_xml: box("deleted"),
+                },
+            ],
+        })
+        const { errorText } = addToolOutput.mock.lastCall?.[0] ?? {}
+        expect(errorText).toContain('Cell with id="deleted" not found')
+        expect(errorText).toContain(
+            "was removed by the user: do not add it back unless the user asks",
+        )
     })
 
     it("draws on the first page when the page is not known", async () => {

@@ -3,10 +3,12 @@
 import { ArrowUpRight, Terminal, X } from "lucide-react"
 import Link from "next/link"
 import { useEffect, useRef, useState } from "react"
+import { useDiagram } from "@/contexts/diagram-context"
 import { useDictionary } from "@/hooks/use-dictionary"
 import { usePathLocale } from "@/hooks/use-path-locale"
 import { getAssetUrl } from "@/lib/base-path"
 import { STORAGE_KEYS } from "@/lib/storage"
+import { noteAction } from "@/lib/user-actions"
 import { cn } from "@/lib/utils"
 
 /**
@@ -20,6 +22,7 @@ function useVideoClosed() {
         setClosed(localStorage.getItem(STORAGE_KEYS.mcpVideoClosed) === "true")
     }, [])
     const close = () => {
+        noteAction("close mcp notice")
         localStorage.setItem(STORAGE_KEYS.mcpVideoClosed, "true")
         setClosed(true)
     }
@@ -28,13 +31,18 @@ function useVideoClosed() {
 
 function PromoVideo({ className }: { className?: string }) {
     const video = useRef<HTMLVideoElement>(null)
-    // Plays by itself only when the system does not ask for reduced motion
+    const { isDrawioReady } = useDiagram()
+    // Plays by itself only when the system does not ask for reduced motion.
+    // Playing downloads the whole file (2 MB), so it starts once draw.io has
+    // loaded: before that the two would share the connection, and the
+    // editor comes first. Until then the poster shows.
     useEffect(() => {
+        if (!isDrawioReady) return
         if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
             return
         }
         video.current?.play().catch(() => {})
-    }, [])
+    }, [isDrawioReady])
     return (
         <video
             ref={video}
@@ -44,7 +52,7 @@ function PromoVideo({ className }: { className?: string }) {
             loop
             playsInline
             controls
-            preload="metadata"
+            preload="none"
             className={cn("aspect-video w-full rounded-lg bg-black", className)}
             data-testid="mcp-video"
         />
@@ -77,6 +85,7 @@ function NoticeLink({ className }: { className?: string }) {
             target="_blank"
             // A new tab loads the page itself: nothing to prefetch
             prefetch={false}
+            onClick={() => noteAction("open mcp page")}
             className={cn("group flex min-w-0 items-center gap-3", className)}
         >
             <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-purple-500/20">

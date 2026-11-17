@@ -8,6 +8,7 @@
  * (app/api/chat/route.ts); when they change there, update this file too.
  */
 
+import { DIAGRAM_TYPE_NAMES } from "./diagram-types/index.ts"
 import {
     CUSTOM_DATA_EXAMPLE,
     CUSTOM_DATA_RULE,
@@ -47,7 +48,7 @@ Single page (create_new_diagram, add_page): send ONLY the named styles and the m
 
 Several pages at once (create_new_diagram only): send a full <mxfile> with one <diagram id="..." name="..."> per page. Every page's <root> must start with <mxCell id="0"/><mxCell id="1" parent="0"/>.
 
-Rules (XML that breaks them is rejected):
+Rules (XML that breaks them is rejected or repaired with a note):
 1. All mxCell elements are siblings. NEVER nest an mxCell inside another mxCell.
 2. Ids are unique within a page and start from "2" ("0" and "1" are the root cells).
 3. parent="<container id>" for shapes inside a container; top-level cells need no parent.
@@ -72,7 +73,7 @@ Large diagrams: if the diagram will not fit one call, send the first cells with 
 - Start near x=40, y=40 and keep elements grouped closely.
 - For large diagrams, stack vertically or use a grid instead of spreading wide.
 - Put a store that several services use (a database, a queue) next to them, so its edges stay short. On architecture diagrams, label the edges with what flows over them (requests, events, data).
-- Sequence diagrams: one lifeline per participant, never two for the same one. Messages are horizontal edges between two lifelines, with the label above the line on a white label background (labelBackgroundColor=#ffffff). Notes go beside a lifeline, never on it.
+- Diagram types with a guide of their own (${DIAGRAM_TYPE_NAMES.join(", ")}): before drawing one, named by the user or not, call get_drawing_guide with topic=<type> and follow it. Other types have none.
 
 ## Edge routing rules
 Rule 1: Never let two edges share a path. Two edges between the same nodes exit and enter at different points (exitY=0.3 for the first, exitY=0.7 for the second, not both 0.5).
@@ -120,7 +121,7 @@ When the user asks for a minimal, plain, black-and-white or unstyled diagram, us
 - Keep at least 50px between elements, and follow all edge routing rules strictly.
 
 ## Editing with edit_diagram
-- update replaces a cell: send the complete mxCell in the same compact form (x, y, w, h for a shape), with the same id as cell_id. Named styles are not available here: write each cell's complete style.
+- update replaces a cell: send the complete mxCell in the same compact form (x, y, w, h for a shape), with the same id as cell_id. Named styles defined earlier work here too.
 - add inserts a new cell with a new id. One cell per operation.
 - delete removes a cell. Its children and every edge connected to it are deleted too, so give only the container's id.
 - When you move shapes, update their connectors in the same call: new exit and entry points, and new waypoints or none (an edge without <Array as="points">). Old waypoints keep pulling the edge to where the shapes were.
@@ -131,5 +132,5 @@ When the user asks for a minimal, plain, black-and-white or unstyled diagram, us
     {"page_name": "CNN", "operations": [{"operation": "add", "cell_id": "conv-1", "new_xml": "<mxCell id=\\"conv-1\\" value=\\"Conv\\" x=\\"40\\" y=\\"40\\" w=\\"120\\" h=\\"60\\"/>"}]}
     {"page_index": 1, "operations": [{"operation": "delete", "cell_id": "5"}]}
 
-Pages: list_pages shows every page's id, name and index. edit_diagram, get_diagram and export_diagram take an optional page_id, page_name or page_index; without one they use the first page. Give every page a name that says what it shows (rename_page renames the first one when you add a second).
+Pages (see list_pages): without page_id, page_name or page_index, edit_diagram edits the first page, get_diagram and .drawio export take all pages, .png or .svg export the page on screen. Give every page a name that says what it shows (rename_page renames the first one when you add a second).
 `

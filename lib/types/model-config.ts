@@ -98,21 +98,56 @@ export function createModelConfig(modelId: string): ModelConfig {
     }
 }
 
+/**
+ * A provider's name in the model picker and the settings list: its display
+ * name, else its type's label. Providers that would show the same name
+ * (two OpenAI-compatible servers without a display name) get the host of
+ * their base URL added, where that tells them apart, else the host with
+ * the path (two paths of one gateway). Providers that share the whole
+ * address (two keys for one server) cannot be told apart by it: they get
+ * the same mark as each other, the one that tells them from the rest.
+ */
+export function providerLabel(
+    provider: ProviderConfig,
+    all: ProviderConfig[],
+): string {
+    const name = (p: ProviderConfig) => p.name || PROVIDERS[p.provider].label
+    const address = (p: ProviderConfig, withPath: boolean) => {
+        try {
+            const { host, pathname } = new URL(p.baseUrl ?? "")
+            return withPath ? (host + pathname).replace(/\/+$/, "") : host
+        } catch {
+            return ""
+        }
+    }
+    // The others of this name, at another address
+    const sameName = all.filter(
+        (p) =>
+            p !== provider &&
+            name(p) === name(provider) &&
+            address(p, true) !== address(provider, true),
+    )
+    if (sameName.length === 0) return name(provider)
+    for (const withPath of [false, true]) {
+        const own = address(provider, withPath)
+        if (own && sameName.every((p) => address(p, withPath) !== own)) {
+            return `${name(provider)} (${own})`
+        }
+    }
+    return name(provider)
+}
+
 // Get all models as flattened list for dropdown (user-defined only)
 export function flattenModels(config: MultiModelConfig): FlattenedModel[] {
     const models: FlattenedModel[] = []
 
     for (const provider of config.providers) {
-        // Use custom name if provided, otherwise use default provider label
-        const providerLabel =
-            provider.name || PROVIDERS[provider.provider].label
-
         for (const model of provider.models) {
             models.push({
                 id: model.id,
                 modelId: model.modelId,
                 provider: provider.provider,
-                providerLabel,
+                providerLabel: providerLabel(provider, config.providers),
                 apiKey: provider.apiKey,
                 baseUrl: provider.baseUrl,
                 // AWS Bedrock fields
@@ -163,6 +198,18 @@ export function ollamaApiUrl(baseUrl: string): string {
     return `${normalizeBaseUrl(baseUrl).replace(/\/(?:api|v1)$/, "")}/api`
 }
 
+/**
+ * OpenAI's own endpoint, which the settings form fills in for a new
+ * provider. It gets the Responses API, as no base URL does: GPT-5.5 and
+ * later refuse tools with reasoning on Chat Completions.
+ */
+export function isOfficialOpenAIUrl(baseUrl: string | undefined): boolean {
+    return (
+        !!baseUrl &&
+        normalizeBaseUrl(baseUrl) === PROVIDERS.openai.defaultBaseUrl
+    )
+}
+
 /** Where a chat request goes for a base URL, or null when the SDK decides */
 export function chatRequestUrl(
     provider: ProviderName,
@@ -172,6 +219,7 @@ export function chatRequestUrl(
     if (!url) return null
     const { sdk, ownRequestPath } = PROVIDERS[provider]
     if (sdk === "anthropic") return `${url}/messages`
+    if (sdk === "openai" && isOfficialOpenAIUrl(url)) return `${url}/responses`
     if (sdk === "ollama") return `${ollamaApiUrl(url)}/chat`
     // These SDKs build their own paths (or, for MiniMax, pick the protocol
     // from the URL)
