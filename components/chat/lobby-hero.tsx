@@ -1,7 +1,19 @@
 import { FileUp, History, Pencil } from "lucide-react"
 import type React from "react"
+import { useEffect, useRef, useState } from "react"
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { useDictionary } from "@/hooks/use-dictionary"
 import { getAssetUrl } from "@/lib/base-path"
+import { noteAction } from "@/lib/user-actions"
 import { cn } from "@/lib/utils"
 import { useChatEngine } from "./chat-engine"
 import { Composer } from "./composer"
@@ -135,16 +147,45 @@ export function LobbyHero({
         },
     ]
 
-    const pickExample = async (example: Example) => {
+    // Counts the picks: a file that arrives after another example was
+    // picked belongs to the earlier prompt and is not attached. Nor one
+    // that arrives once this start screen is gone: the next start screen
+    // counts its own picks from zero, and the attachments are shared.
+    const pickCount = useRef(0)
+    useEffect(
+        () => () => {
+            pickCount.current++
+        },
+        [],
+    )
+    const applyExample = async (example: Example) => {
+        noteAction(`pick example ${example.key}`)
+        const pick = ++pickCount.current
         engine.setInput(example.prompt)
         if (!example.file) {
             engine.setFiles([])
             return
         }
         try {
-            engine.setFiles([await loadExampleFile(example.file)])
+            const file = await loadExampleFile(example.file)
+            if (pick === pickCount.current) engine.setFiles([file])
         } catch (error) {
             console.error(dict.errors.failedToLoadExample, error)
+        }
+    }
+
+    // Text the user typed is replaced only on confirm, as a saved prompt
+    // does: text put there by code cannot be brought back with undo.
+    // Another example's prompt is replaced at once.
+    const [exampleToConfirm, setExampleToConfirm] = useState<Example | null>(
+        null,
+    )
+    const pickExample = (example: Example) => {
+        const typed = engine.input.trim()
+        if (typed && !examples.some((e) => e.prompt === typed)) {
+            setExampleToConfirm(example)
+        } else {
+            applyExample(example)
         }
     }
 
@@ -166,9 +207,12 @@ export function LobbyHero({
             >
                 {t.title}
             </h1>
+            {/* Lines of about the same length, so the last one is not a
+                single character (Chinese); Japanese breaks between phrases,
+                not inside a word */}
             <p
                 className={cn(
-                    "mx-auto mt-2.5 max-w-[34em] text-center text-muted-foreground",
+                    "mx-auto mt-2.5 max-w-[34em] text-center text-balance text-muted-foreground [word-break:auto-phrase]",
                     compact ? "mb-5 text-[13px]" : "mb-6 text-[14.5px]",
                 )}
             >
@@ -263,7 +307,10 @@ export function LobbyHero({
                 </button>
                 <button
                     type="button"
-                    onClick={onDrawYourself}
+                    onClick={() => {
+                        noteAction("draw yourself")
+                        onDrawYourself()
+                    }}
                     className={startButtonClass}
                     data-testid="draw-yourself"
                 >
@@ -271,6 +318,35 @@ export function LobbyHero({
                     {t.drawYourself}
                 </button>
             </div>
+
+            <AlertDialog
+                open={exampleToConfirm !== null}
+                onOpenChange={(open) => !open && setExampleToConfirm(null)}
+            >
+                <AlertDialogContent className="max-w-sm">
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>
+                            {dict.templates.confirmReplaceTitle}
+                        </AlertDialogTitle>
+                        <AlertDialogDescription>
+                            {dict.templates.confirmReplaceDescription}
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <AlertDialogCancel>
+                            {dict.common.cancel}
+                        </AlertDialogCancel>
+                        <AlertDialogAction
+                            onClick={() =>
+                                exampleToConfirm &&
+                                applyExample(exampleToConfirm)
+                            }
+                        >
+                            {dict.templates.confirmReplaceButton}
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
         </div>
     )
 }

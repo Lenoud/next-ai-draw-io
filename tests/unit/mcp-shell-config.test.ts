@@ -11,7 +11,9 @@ import {
     getShellDictionary,
     matchLocale,
     pickLocale,
+    shareLocaleWithDrawio,
 } from "@/packages/mcp-server/shell/dictionary"
+import { feedbackIssueUrl } from "@/packages/mcp-server/shell/feedback"
 import { readShellConfig } from "@/packages/mcp-server/shell/runtime-config"
 import {
     isDarkPreferred,
@@ -48,6 +50,7 @@ describe("shell runtime config", () => {
             drawioLang: "",
             drawioDark: "auto",
             lang: "",
+            version: "",
         })
         const odd = readShellConfig({
             sessionId: 42,
@@ -57,6 +60,28 @@ describe("shell runtime config", () => {
         expect(odd.sessionId).toBe("")
         expect(odd.drawioDark).toBe("auto")
         expect(odd.token).toBe("t")
+    })
+})
+
+describe("shell feedback issue", () => {
+    it("fills in the server version, draw.io and the browser", () => {
+        const url = new URL(
+            feedbackIssueUrl(
+                readShellConfig({
+                    version: "0.4.11",
+                    drawioBaseUrl: "/drawio/index.html",
+                }),
+                "TestBrowser/1.0",
+            ),
+        )
+        expect(url.origin + url.pathname).toBe(
+            "https://github.com/DayuanJiang/next-ai-draw-io/issues/new",
+        )
+        expect(url.searchParams.get("title")).toBe("[MCP] ")
+        const body = url.searchParams.get("body")
+        expect(body).toContain("- MCP server: 0.4.11")
+        expect(body).toContain("- draw.io: bundled copy")
+        expect(body).toContain("- Browser: TestBrowser/1.0")
     })
 })
 
@@ -114,6 +139,29 @@ describe("shell language", () => {
         expect(pickLocale("", [])).toBe("en")
     })
 
+    it("gives draw.io the shell's language while its own settings name none", () => {
+        // draw.io reads the language of its settings (Extras > Language)
+        // when it starts, and is English without one
+        const stored = () =>
+            JSON.parse(localStorage.getItem(".drawio-config") ?? "null")
+        localStorage.clear()
+        shareLocaleWithDrawio("en")
+        expect(stored()).toBeNull()
+        shareLocaleWithDrawio("ja")
+        expect(stored()).toEqual({ language: "ja" })
+        // A language is there (picked in draw.io's menu, or ours): kept
+        shareLocaleWithDrawio("zh")
+        expect(stored()).toEqual({ language: "ja" })
+        // draw.io's settings without a language keep their other fields
+        localStorage.setItem(
+            ".drawio-config",
+            JSON.stringify({ language: "", ui: "sketch" }),
+        )
+        shareLocaleWithDrawio("zh-Hant")
+        expect(stored()).toEqual({ language: "zh-tw", ui: "sketch" })
+        localStorage.clear()
+    })
+
     it("has every dictionary, with the shell's own texts", () => {
         for (const locale of i18n.locales) {
             const dict = getShellDictionary(locale)
@@ -121,12 +169,15 @@ describe("shell language", () => {
                 "addedPage",
                 "aiChanged",
                 "connected",
+                "feedback",
                 "fileChanged",
                 "fileChangedHint",
                 "hideVersions",
                 "historyChanged",
+                "noSession",
                 "offline",
                 "openedFile",
+                "renamedPage",
                 "restoreFailed",
                 "restoredFromFile",
                 "showVersions",

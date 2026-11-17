@@ -1,6 +1,5 @@
 import type { ChatAddToolOutputFunction } from "ai"
 import type { RefObject } from "react"
-import type { DiagramOperation } from "@/components/chat/types"
 import type {
     ValidationState,
     ValidationStatus,
@@ -13,7 +12,11 @@ import type { ValidationResult } from "@/lib/diagram-validator"
 import { formatValidationFeedback } from "@/lib/diagram-validator"
 import { isMxCellXmlComplete } from "@/lib/utils"
 import { foldCells } from "@/packages/mcp-server/src/compact-cells.ts"
-import { editDiagram } from "@/packages/mcp-server/src/edit-diagram.ts"
+import { notesText } from "@/packages/mcp-server/src/diagram-operations.ts"
+import {
+    type EditOperation,
+    editDiagram,
+} from "@/packages/mcp-server/src/edit-diagram.ts"
 import { restoreImageData } from "@/packages/mcp-server/src/embedded-images.ts"
 import { prepareNewDiagram } from "@/packages/mcp-server/src/new-diagram.ts"
 import { hasCells } from "@/packages/mcp-server/src/pages.ts"
@@ -21,6 +24,16 @@ import { hasCells } from "@/packages/mcp-server/src/pages.ts"
 // The page a drawing is wrapped in; on the canvas it replaces the page the
 // model works on, so the canvas page keeps its own id and name
 const NEW_PAGE = { pageId: "page-1", pageName: "Page-1" }
+
+// The type the model named for a drawing whose output was cut off, for the
+// append_diagram call that completes it
+let truncatedType: string | undefined
+
+/** What the layout of the diagram's type did, for the tool result */
+const laidText = (laid: string[]) =>
+    laid.length > 0
+        ? ` ${laid.join(" ")} The cells on the canvas now have these positions and paths.`
+        : ""
 
 interface ToolCall {
     toolCallId: string
@@ -63,7 +76,7 @@ interface UseDiagramToolHandlersParams {
         meta?: { toolCallId?: string; pageId?: string | null },
     ) => string | null
     onFetchChart: () => Promise<string>
-    captureValidationPng?: () => Promise<string | null>
+    captureValidationPng?: (pageId?: string | null) => Promise<string | null>
     validateDiagram?: ValidateDiagramFn
     enableVlmValidation?: boolean
     sessionId?: string
@@ -207,7 +220,7 @@ export function useDiagramToolHandlers({
         addToolOutput: AddToolOutputFn,
         originalXml: string | undefined,
     ) => {
-        const { xml } = toolCall.input as { xml: string }
+        const { xml, type } = toolCall.input as { xml: string; type?: string }
 
         // Check if XML is truncated (incomplete mxCell indicates truncated output)
         const isTruncated = !isMxCellXmlComplete(xml)
@@ -215,6 +228,7 @@ export function useDiagramToolHandlers({
         if (isTruncated) {
             // Store the partial XML for continuation via append_diagram
             partialXmlRef.current = xml
+            truncatedType = type
             // The half drawn preview stays while append_diagram finishes
             // it; the chat engine brings this diagram back if that never
             // happens
@@ -256,7 +270,7 @@ NEXT STEP: Call append_diagram with the continuation XML.
         // One undo step (and a version) right away, before the screenshot
         // check: a stop, another chat or a hand edit during the check then
         // finds the diagram already in place
-        const prepared = prepareNewDiagram(withImages(finalXml), NEW_PAGE)
+        const prepared = prepareNewDiagram(withImages(finalXml), NEW_PAGE, type)
         if (prepared.ok) {
             commit(
                 onAiPage(prepared.xml),
@@ -264,6 +278,7 @@ NEXT STEP: Call append_diagram with the continuation XML.
                 prepared.fixes.length === 0,
             )
         }
+        const displayed = `Successfully displayed the diagram.${prepared.ok ? laidText(prepared.laid) : ""}`
         const validationError = prepared.ok ? null : prepared.error
 
         if (validationError) {
@@ -305,7 +320,7 @@ ${finalXml}
                     // This is a best-effort heuristic and may need adjustment for complex diagrams or slower devices.
                     await new Promise((resolve) => setTimeout(resolve, 100))
 
-                    capturedPngData = await captureValidationPng()
+                    capturedPngData = await captureValidationPng(aiPageId())
                     // Stopped while the screenshot was taken: no check. The
                     // chat waits for this handler, so it must end now.
                     if (stopped?.()) {
@@ -397,7 +412,7 @@ ${finalXml}
                         addToolOutput({
                             tool: "display_diagram",
                             toolCallId: toolCall.toolCallId,
-                            output: "Successfully displayed the diagram.",
+                            output: displayed,
                         })
                         return
                     }
@@ -419,7 +434,7 @@ ${finalXml}
             addToolOutput({
                 tool: "display_diagram",
                 toolCallId: toolCall.toolCallId,
-                output: "Successfully displayed the diagram.",
+                output: displayed,
             })
         }
     }
@@ -432,7 +447,7 @@ ${finalXml}
         originalXml: string | undefined,
     ) => {
         const { operations } = toolCall.input as {
-            operations: DiagramOperation[]
+            operations: EditOperation[]
         }
 
         let currentXml = ""
@@ -467,6 +482,11 @@ ${finalXml}
                     ? outcome.errors[0]
                     : `No changes were made because ${outcome.errors.length} operation(s) failed:\n${outcome.errors.map((e) => `- ${e}`).join("\n")}`
                 restoreOriginal()
+                // An edit of a cell the user deleted by hand ends here
+                // ("Cell not found"). The sentence on such cells keeps
+                // the retry from drawing the cell again: GPT-6 Luna did
+                // in 10 replays of 10, and with this sentence and the
+                // one in the canvas note (lib/chat-helpers.ts) in 3 of 30.
                 addToolOutput({
                     tool: "edit_diagram",
                     toolCallId: toolCall.toolCallId,
@@ -478,7 +498,7 @@ Current diagram XML:
 ${shownToModel(currentXml)}
 \`\`\`
 
-Please check the cell IDs and retry.`,
+A cell of an earlier canvas that is missing from it was removed by the user: do not add it back unless the user asks. Please check the cell IDs and retry.`,
                 })
                 return
             }
@@ -489,10 +509,12 @@ Please check the cell IDs and retry.`,
                 outcome.fixes.length === 0,
                 currentXml,
             )
+            // With what the model should know about them: a delete that
+            // found no such cell and was skipped, cells a delete took along
             addToolOutput({
                 tool: "edit_diagram",
                 toolCallId: toolCall.toolCallId,
-                output: `Successfully applied ${outcome.applied} operation(s) to the diagram.`,
+                output: `Successfully applied ${outcome.applied} operation(s) to the diagram.${notesText(outcome.notes)}`,
             })
         } catch (error) {
             console.error("[edit_diagram] Failed:", error)
@@ -577,7 +599,12 @@ Start your continuation with the NEXT character after where it stopped.`,
             const finalXml = partialXmlRef.current
             partialXmlRef.current = "" // Reset
 
-            const prepared = prepareNewDiagram(withImages(finalXml), NEW_PAGE)
+            const prepared = prepareNewDiagram(
+                withImages(finalXml),
+                NEW_PAGE,
+                truncatedType,
+            )
+            truncatedType = undefined
             // The continuation ends here, drawn or not: it takes the stored
             // originals, so the preview code undoes none of them later
             const originalXml = takeOriginals()
@@ -611,7 +638,7 @@ Please use display_diagram with corrected XML.`,
                 addToolOutput({
                     tool: "append_diagram",
                     toolCallId: toolCall.toolCallId,
-                    output: "Diagram assembly complete and displayed successfully.",
+                    output: `Diagram assembly complete and displayed successfully.${prepared.ok ? laidText(prepared.laid) : ""}`,
                 })
             }
         } else {

@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { toast } from "sonner"
+import { toastUnexpectedError } from "@/lib/client-error-report"
 import { formatMessage } from "@/lib/i18n/utils"
 import {
     extractPdfText,
@@ -20,7 +21,11 @@ export interface FileData {
 /** Toast texts; {name}, {limit} and {size} are filled in */
 export interface FileProcessorMessages {
     tooLong: string
+    /** A file without text, such as a scanned PDF */
+    noText: string
     readFailed: string
+    /** The Report button of the read failure */
+    report: string
 }
 
 /**
@@ -30,6 +35,17 @@ export interface FileProcessorMessages {
 export function useFileProcessor(messages: FileProcessorMessages) {
     const [files, setFiles] = useState<File[]>([])
     const [pdfData, setPdfData] = useState<Map<File, FileData>>(new Map())
+
+    // A file whose text cannot be sent leaves the list: shown as attached,
+    // it would go out with the message as nothing at all
+    const removeFile = (file: File) => {
+        setPdfData((prev) => {
+            const next = new Map(prev)
+            next.delete(file)
+            return next
+        })
+        setFiles((prev) => prev.filter((f) => f !== file))
+    }
 
     const handleFileChange = async (newFiles: File[]) => {
         setFiles(newFiles)
@@ -72,13 +88,17 @@ export function useFileProcessor(messages: FileProcessorMessages) {
                             size: (text.length / 1000).toFixed(1),
                         }),
                     )
-                    setPdfData((prev) => {
-                        const next = new Map(prev)
-                        next.delete(file)
-                        return next
-                    })
-                    // Remove the file from the list
-                    setFiles((prev) => prev.filter((f) => f !== file))
+                    removeFile(file)
+                    continue
+                }
+
+                // A scanned PDF has pictures of its pages and no text: unpdf
+                // gives "", or the line breaks between its pages
+                if (!text.trim()) {
+                    toast.error(
+                        formatMessage(messages.noText, { name: file.name }),
+                    )
+                    removeFile(file)
                     continue
                 }
 
@@ -95,14 +115,12 @@ export function useFileProcessor(messages: FileProcessorMessages) {
                 })
             } catch (error) {
                 console.error("Failed to extract text:", error)
-                toast.error(
+                toastUnexpectedError(
                     formatMessage(messages.readFailed, { name: file.name }),
+                    messages.report,
+                    error,
                 )
-                setPdfData((prev) => {
-                    const next = new Map(prev)
-                    next.delete(file)
-                    return next
-                })
+                removeFile(file)
             }
         }
     }

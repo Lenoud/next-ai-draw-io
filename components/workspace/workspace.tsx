@@ -25,6 +25,8 @@ import { setAppShortcutHandler, setFileTitle } from "@/lib/drawio/editor-bridge"
 import { i18n, type Locale } from "@/lib/i18n/config"
 import { modKey } from "@/lib/platform"
 import { STORAGE_KEYS } from "@/lib/storage"
+import { startUsageLog } from "@/lib/usage-log"
+import { noteAction } from "@/lib/user-actions"
 import { cn, isRealDiagram } from "@/lib/utils"
 import { useSettingsStore } from "@/stores/settings-store"
 import { useUiStore } from "@/stores/ui-store"
@@ -68,11 +70,19 @@ function useSavedLocale() {
 
 /** The diagram's title as a file name, or diagram-YYYY-MM-DD without one */
 export function exportFilename(title: string | null): string {
-    const name = (title && title !== "New Chat" ? title : "")
+    let name = (title && title !== "New Chat" ? title : "")
         .replace(/[\\/:*?"<>|]+/g, "-")
         .replace(/\s+/g, " ")
         .trim()
-        .slice(0, 80)
+    // A long title (the first message) is cut at the end of a word, where
+    // it has spaces
+    if (name.length > 80) {
+        const space = name.lastIndexOf(" ", 80)
+        name = name.slice(0, space > 40 ? space : 80)
+    }
+    // No punctuation at the end: a full stop there would stand next to
+    // the extension's ("arrow..drawio")
+    name = name.replace(/[\s.,;。、，…-]+$/, "")
     // Local date (toISOString would give UTC)
     return name || `diagram-${new Date().toLocaleDateString("sv-SE")}`
 }
@@ -116,6 +126,7 @@ export function Workspace() {
     useEffect(() => {
         hydrate()
     }, [hydrate])
+    useEffect(startUsageLog, [])
     useSavedLocale()
 
     return (
@@ -183,7 +194,11 @@ function WorkspaceLayout() {
             // ⌘⇧B stays with the browser (Chrome's bookmarks bar)
             if (!event.shiftKey && (event.key === "b" || event.key === "B")) {
                 if (isMobile) return false
+                noteAction("toggle chat panel")
                 togglePanel()
+                // Shown again, its input takes the focus, which went to
+                // <body> when the panel was hidden
+                if (useUiStore.getState().panelOpen) focusComposer()
                 return true
             }
             if (event.key === "/") {
@@ -252,6 +267,8 @@ function WorkspaceLayout() {
     }, [sliding])
     // The panel floats on the right; the canvas ends where it begins
     const canvasRight = panelVisible ? panelWidth + PANEL_GAP * 2 : 0
+    // Desktop: the start screen lies over the canvas
+    const heroCoversCanvas = !isMobile && showHero
 
     return (
         <div
@@ -262,29 +279,40 @@ function WorkspaceLayout() {
                 and lose its undo history */}
             <div className="absolute inset-0 flex flex-col">
                 <div className="relative min-h-0 flex-1">
-                    <CanvasStage
-                        className={
-                            isMobile
-                                ? cn(
-                                      "inset-0",
-                                      mobileView !== "canvas" && "invisible",
-                                  )
-                                : cn(
-                                      "inset-y-0 left-0",
-                                      sliding &&
-                                          "transition-[right] duration-300 ease-[var(--ease-out)]",
-                                  )
-                        }
-                        style={isMobile ? undefined : { right: canvasRight }}
-                        hideOverlays={!isMobile && showHero}
-                        overlay={(size) => (
-                            <SelectionAsk
-                                width={size.width}
-                                height={size.height}
-                            />
-                        )}
-                        waitForSavedLocale
-                    />
+                    {/* Under the start screen the canvas takes no focus:
+                        Tab would go into the hidden draw.io, and keys typed
+                        there would draw shapes */}
+                    <div className="absolute inset-0" inert={heroCoversCanvas}>
+                        <CanvasStage
+                            className={
+                                isMobile
+                                    ? cn(
+                                          "inset-0",
+                                          mobileView !== "canvas" &&
+                                              "invisible",
+                                      )
+                                    : cn(
+                                          "inset-y-0 left-0",
+                                          sliding &&
+                                              // Reduced motion: at once. Still a
+                                              // transition, as the canvas stage
+                                              // re-centres the diagram at its end.
+                                              "transition-[right] duration-300 ease-[var(--ease-out)] motion-reduce:duration-[1ms]",
+                                      )
+                            }
+                            style={
+                                isMobile ? undefined : { right: canvasRight }
+                            }
+                            hideOverlays={heroCoversCanvas}
+                            overlay={(size) => (
+                                <SelectionAsk
+                                    width={size.width}
+                                    height={size.height}
+                                />
+                            )}
+                            waitForSavedLocale
+                        />
+                    </div>
                     {isMobile ? (
                         mobileView === "chat" &&
                         (showHero ? (
@@ -319,7 +347,12 @@ function WorkspaceLayout() {
                                     <IconButton
                                         label={dict.nav.showPanel}
                                         shortcut={`${modKey}B`}
-                                        onClick={() => setPanelOpen(true)}
+                                        // The button goes away: the focus
+                                        // moves on to the panel's input
+                                        onClick={() => {
+                                            noteAction("show chat panel")
+                                            focusComposer()
+                                        }}
                                         data-testid="show-panel"
                                     >
                                         <PanelRightOpen />
@@ -405,14 +438,16 @@ function WorkspaceLayout() {
             <SaveDialog
                 open={saveDialogOpen}
                 onOpenChange={setSaveDialogOpen}
-                onSave={(filename, format) =>
+                onSave={(filename, format) => {
+                    noteAction(`export ${format}`)
                     saveDiagramToFile(
                         filename,
                         format,
                         engine.langfuseSessionId,
                         dict.save.savedSuccessfully,
+                        dict.save.exportFailed,
                     )
-                }
+                }}
                 defaultFilename={exportFilename(engine.currentTitle)}
             />
         </div>

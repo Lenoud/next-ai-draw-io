@@ -9,6 +9,7 @@ import {
     highlightChangedCells,
 } from "@/lib/drawio/editor-bridge"
 import { formatMessage } from "@/lib/i18n/utils"
+import { noteAction } from "@/lib/user-actions"
 import { BLANK_MXFILE } from "@/packages/mcp-server/src/pages.ts"
 import { useVersionsStore } from "@/stores/versions-store"
 
@@ -79,16 +80,22 @@ export function useVersions({
             if (!fromScratch) {
                 highlightChangedCells(touchedIds, pageId, { navigate: false })
             }
-            // The picture is of the canvas: take it right away, before a
-            // newer version can be on it; once one is, this one gets none
-            // rather than the newer one's
-            const isNewest = () =>
-                useVersionsStore.getState().versions.at(-1)?.id === id
+            // The picture is of the canvas: take it right away, while this
+            // version is on it. The wait for a draw.io that is still
+            // loading is long: once the canvas has held something else (a
+            // newer version, or this one's change undone, even when it is
+            // redone by the time draw.io answers), this version gets no
+            // picture rather than one of that.
+            let left = false
+            const stopWatching = useVersionsStore.subscribe((state) => {
+                if (state.onCanvasVersionId !== id) left = true
+            })
             setTimeout(async () => {
-                const svg = isNewest() ? await getVersionSvg() : null
+                const svg = left ? null : await getVersionSvg()
+                stopWatching()
                 useVersionsStore
                     .getState()
-                    .updateVersion(id, { svg: svg && isNewest() ? svg : "" })
+                    .updateVersion(id, { svg: svg && !left ? svg : "" })
             }, 0)
         })
         return () => setCommitHandler(null)
@@ -145,11 +152,13 @@ export function useVersions({
         const store = useVersionsStore.getState()
         const index = store.versions.findIndex((v) => v.id === versionId)
         if (index < 0) return
+        noteAction("restore version")
         // The canvas before the restore, to go back to it: a multi-page
         // document is loaded in full, which Ctrl+Z cannot undo
         const before = chartXMLRef.current
         const wasOnCanvas = store.onCanvasVersionId
         const wasUndone = store.undoneVersionId
+        const wasEdited = store.editedSinceId
         const generation = getChatGeneration()
         apply(store.versions[index].xml)
         store.setOnCanvas(versionId)
@@ -167,10 +176,18 @@ export function useVersions({
                         // changing the canvas: the old canvas is not theirs
                         if (!before || isTurnActive()) return
                         if (getChatGeneration() !== generation) return
+                        noteAction("undo restore")
                         apply(before)
                         const now = useVersionsStore.getState()
                         if (wasUndone) now.setUndone(wasUndone, wasOnCanvas)
                         else if (wasOnCanvas) now.setOnCanvas(wasOnCanvas)
+                        else if (wasEdited) {
+                            // The hand edits made since that version are
+                            // back: its card says so again (else the
+                            // version just restored would get the note)
+                            now.setOnCanvas(wasEdited)
+                            now.clearCanvasFlags()
+                        }
                     },
                 },
             },
@@ -184,11 +201,13 @@ export function useVersions({
         const version = store.versions.find((v) => v.id === versionId)
         if (!version) return
         if (store.undoneVersionId === versionId) {
+            noteAction("redo version")
             apply(version.xml)
             store.setOnCanvas(versionId)
             return
         }
         if (version.beforeXml === undefined) return
+        noteAction("undo version")
         const before = version.beforeXml || BLANK_MXFILE
         apply(before)
         store.setUndone(versionId, olderVersionShowing(before)?.id)

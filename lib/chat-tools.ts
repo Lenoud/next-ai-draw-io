@@ -2,6 +2,10 @@ import { type InferUITools, tool } from "ai"
 import path from "path"
 import { z } from "zod"
 import {
+    DIAGRAM_TYPE_LIST,
+    getDiagramGuide,
+} from "@/packages/mcp-server/src/diagram-types/index.ts"
+import {
     getShapeLibrary,
     SHAPE_LIBRARY_LIST,
 } from "@/packages/mcp-server/src/shape-library.ts"
@@ -14,7 +18,7 @@ import {
  * The chat's tools. display_diagram, edit_diagram and append_diagram run in
  * the browser: the chat engine's tool handler puts their result on the
  * canvas and reports it back as text, so they have an output schema and no
- * execute. get_shape_library runs on the server.
+ * execute. get_shape_library and get_diagram_guide run on the server.
  */
 export const chatTools = {
     display_diagram: tool({
@@ -42,6 +46,13 @@ Notes:
 `,
         inputSchema: z.object({
             xml: z.string().describe("XML string to be displayed on draw.io"),
+            // A plain string: a name outside the list must not fail the call
+            type: z
+                .string()
+                .optional()
+                .describe(
+                    "The diagram's type, only when you draw by a guide of get_diagram_guide: the guide says which. Leave it out for every other diagram.",
+                ),
         }),
         outputSchema: z.string(),
     }),
@@ -53,7 +64,7 @@ Operations:
 - add: Add a new cell. Provide cell_id (new unique id) and new_xml.
 - delete: Remove a cell. Cascade is automatic: children AND edges (source/target) are auto-deleted. Only specify ONE cell_id.
 
-For update/add, new_xml is the complete mxCell (inside its <object> wrapper when it has custom data) in the compact form (a shape with x, y, w, h; an edge with source and target), with its complete style (named styles are not available in edit_diagram).
+For update/add, new_xml is the complete mxCell (inside its <object> wrapper when it has custom data) in the compact form (a shape with x, y, w, h; an edge with source and target). Its style can use the named styles of an earlier display_diagram call; edit_diagram defines none itself (no mxStyle).
 
 ⚠️ JSON ESCAPING: Every " inside new_xml MUST be escaped as \\". Example: id=\\"5\\" value=\\"Label\\"
 
@@ -71,10 +82,14 @@ Example - Delete container (children & edges auto-deleted):
                             .describe(
                                 "Operation to perform: add, update, or delete",
                             ),
+                        // Optional, so that a call with one add or update
+                        // that lacks it passes the input check: editDiagram
+                        // then reads the id from new_xml
                         cell_id: z
                             .string()
+                            .optional()
                             .describe(
-                                "The id of the mxCell. Must match the id attribute in new_xml.",
+                                "The id of the mxCell. Must match the id attribute in new_xml. Required for delete.",
                             ),
                         new_xml: z
                             .string()
@@ -128,6 +143,22 @@ Call this tool to get shape names and usage syntax for a specific library.`,
             const result = await getShapeLibrary(
                 library,
                 path.join(process.cwd(), "docs/shape-libraries"),
+            )
+            return result.ok ? result.text : result.error
+        },
+    }),
+    get_diagram_guide: tool({
+        description: `Get the drawing guide for a diagram type: the shapes, styles and positions that draw it correctly in draw.io. Call it before display_diagram when the diagram to draw is one of these types, whether or not the user named the type:
+${DIAGRAM_TYPE_LIST}
+Every other type (flowchart, ER, state machine, mind map, architecture...) has no guide: do not call this tool for it, and do not borrow another type's guide.`,
+        inputSchema: z.object({
+            type: z.string().describe("Diagram type (e.g., 'sequence')"),
+        }),
+        execute: async ({ type }) => {
+            const result = getDiagramGuide(
+                type,
+                "display_diagram",
+                "edit_diagram",
             )
             return result.ok ? result.text : result.error
         },
